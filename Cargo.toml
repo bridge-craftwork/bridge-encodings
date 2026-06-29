@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 description = "File format parsers for bridge: PBN, LIN, oneline formats"
-repository = "https://github.com/Rick-Wilson/bridge-encodings"
+repository = "https://github.com/bridge-craftwork/bridge-encodings"
 
 [dependencies]
-bridge-types = { git = "https://github.com/Rick-Wilson/bridge-types" }
+bridge-types = { git = "https://github.com/bridge-craftwork/bridge-types" }
 thiserror = "2.0"

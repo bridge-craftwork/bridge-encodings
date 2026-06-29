@@ -34,7 +34,7 @@ Before committing, always run and fix:
 ## Git Configuration
 
 Use SSH for all GitHub operations:
-- Clone/push/pull: `git@github.com:Rick-Wilson/repo.git` (not `https://`)
+- Clone/push/pull: `git@github.com:bridge-craftwork/repo.git` (not `https://`)
 - Remote URLs should use SSH format
 
 ## Related Projects

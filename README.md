@@ -4,7 +4,7 @@ File format parsers and writers for contract bridge in Rust.
 
 ## Overview
 
-`bridge-encodings` provides parsers and writers for common bridge file formats. It builds on [`bridge-types`](https://github.com/Rick-Wilson/bridge-types) for core data structures.
+`bridge-encodings` provides parsers and writers for common bridge file formats. It builds on [`bridge-types`](https://github.com/bridge-craftwork/bridge-types) for core data structures.
 
 ## Supported Formats
 
@@ -18,7 +18,7 @@ File format parsers and writers for contract bridge in Rust.
 
 ```toml
 [dependencies]
-bridge-encodings = { git = "https://github.com/Rick-Wilson/bridge-encodings" }
+bridge-encodings = { git = "https://github.com/bridge-craftwork/bridge-encodings" }
 ```
 
 ## Quick Start
@@ -120,9 +120,9 @@ use bridge_encodings::{Board, Card, Deal, Direction, Hand, Suit, Rank, Vulnerabi
 
 ## Related Crates
 
-- [`bridge-types`](https://github.com/Rick-Wilson/bridge-types) - Core data types (dependency)
-- [`bridge-solver`](https://github.com/Rick-Wilson/bridge-solver) - Double-dummy analysis
-- [`pbn-to-pdf`](https://github.com/Rick-Wilson/pbn-to-pdf) - PDF generation from PBN
+- [`bridge-types`](https://github.com/bridge-craftwork/bridge-types) - Core data types (dependency)
+- [`bridge-solver`](https://github.com/bridge-craftwork/bridge-solver) - Double-dummy analysis
+- [`pbn-to-pdf`](https://github.com/bridge-craftwork/pbn-to-pdf) - PDF generation from PBN
 
 ## License
 
