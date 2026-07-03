@@ -18,14 +18,14 @@ This file provides guidance to Claude Code when working with this repository.
 cargo fmt --check                 # no dependency resolution; bare cargo is fine
 ```
 
-Bare cargo is correct only when you *want* the committed lock's git pins — i.e. reproducing exactly what CI builds (pre-commit checks, release verification). The committed `Cargo.lock` must always pin `git+https://` sources for the internal crates; never commit a lock where those entries have lost their `source =` lines.
+For CI-parity builds (pre-commit checks, release verification) use `./dev-build.sh --ci test` (any cargo subcommand works after `--ci`) — it temporarily disables the local patches and builds with the committed lock's git pins. **Avoid bare cargo for anything that resolves dependencies** (build/test/check/run): with the patches present, a same-version patch is applied immediately and silently rewrites `Cargo.lock` to local-path entries, while a version mismatch makes the patches silently ignored — both wrong. The committed `Cargo.lock` must always pin `git+https://` sources for the internal crates; never commit a lock where those entries have lost their `source =` lines.
 
 ## Pre-commit Requirements
 
 Before committing, always run and fix:
 1. `cargo fmt --all` - Format all code
-2. `cargo clippy --all-targets -- -D warnings` - Fix all clippy warnings
-3. `cargo test` - Ensure all tests pass
+2. `./dev-build.sh --ci clippy --all-targets -- -D warnings` - Fix all clippy warnings
+3. `./dev-build.sh --ci test` - Ensure all tests pass (CI parity: patches disabled, committed lock's git pins)
 
 ## Code Standards
 

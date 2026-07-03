@@ -4,37 +4,70 @@
 #
 # Why this exists: this repo depends on sibling bridge crates as *git*
 # dependencies, with gitignored [patch] overrides in .cargo/config.toml
-# redirecting them to local checkouts during development. Cargo never lets
-# a [patch] override an existing Cargo.lock pin, so a bare `cargo build`
-# silently compiles the GitHub revisions of those crates — NOT your local
-# edits. Conversely, once the patches do take effect they rewrite
-# Cargo.lock with local-path entries that must never be committed (CI has
-# no sibling checkouts).
+# redirecting them to local checkouts during development. That combination
+# is a trap for bare cargo:
 #
-# This script keeps two lockfiles and swaps them around the cargo call:
+#   * When the local crate's version EQUALS the locked one, any resolving
+#     cargo command (build/test/check/run) applies the patch immediately and
+#     silently REWRITES Cargo.lock with local-path entries that must never
+#     be committed (CI has no sibling checkouts).
+#   * When the versions differ, the patch is silently IGNORED and you build
+#     the GitHub revisions instead of your local edits.
+#
+# Either way bare cargo does the wrong thing, so always go through this
+# script. It keeps two lockfiles and swaps them around the cargo call:
+#
 #   Cargo.lock       committed lock, pinned to git sources (CI truth)
 #   .cargo/dev.lock  local-only lock, resolved with the patches applied
-# Afterwards it verifies every patched crate in the dependency graph
-# actually resolved to a local path, and fails loudly if not.
+#
+# and verifies every patched crate in the dependency graph actually resolved
+# to a local path, failing loudly if not. The committed Cargo.lock is never
+# touched.
 #
 # Usage:
-#   ./dev-build.sh                  # cargo build
-#   ./dev-build.sh test             # cargo test
+#   ./dev-build.sh                  # cargo build, against local checkouts
+#   ./dev-build.sh test             # cargo test, against local checkouts
 #   ./dev-build.sh build --release  # any cargo subcommand + args
+#   ./dev-build.sh --ci test        # CI-parity: patches disabled, committed
+#                                   # lock's git pins, lock rewrite guarded
 #
 set -euo pipefail
 cd "$(dirname "$0")"
 
 CONFIG=.cargo/config.toml
+CONFIG_OFF=.cargo/config.toml.ci-off
 DEV_LOCK=.cargo/dev.lock
 CI_LOCK_STASH=.cargo/ci.lock.swap
 
+ci_mode=""
+if [[ ${1:-} == --ci ]]; then
+    ci_mode=1
+    shift
+fi
 [[ $# -eq 0 ]] && set -- build
 
 # No local patch overrides: behave exactly like cargo.
 if [[ ! -f $CONFIG ]] || ! grep -q '^\[patch\.' "$CONFIG"; then
     exec cargo "$@"
 fi
+
+# --- CI-parity mode: disable the patches, build with the committed lock ---
+if [[ -n $ci_mode ]]; then
+    lock_before=""
+    [[ -f Cargo.lock ]] && lock_before=$(cksum < Cargo.lock)
+    mv "$CONFIG" "$CONFIG_OFF"
+    restore_ci() { [[ -f $CONFIG_OFF ]] && mv "$CONFIG_OFF" "$CONFIG"; }
+    trap restore_ci EXIT
+    cargo "$@"
+    if [[ -n $lock_before && $(cksum < Cargo.lock) != "$lock_before" ]]; then
+        echo "dev-build: NOTE: Cargo.lock was re-resolved during this CI-parity run." >&2
+        echo "dev-build: review 'git diff Cargo.lock' — internal crates must keep their" >&2
+        echo "dev-build: source = \"git+https://...\" lines before committing." >&2
+    fi
+    exit 0
+fi
+
+# --- dev mode: swap in the dev lock, build against local checkouts ---
 
 # Crate names the config patches to local paths.
 patched=$(sed -n 's/^\([A-Za-z0-9_-]*\) *= *{ *path *=.*/\1/p' "$CONFIG")
