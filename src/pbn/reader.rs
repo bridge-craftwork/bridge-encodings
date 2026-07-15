@@ -174,7 +174,12 @@ fn flush_commentary(st: &mut ParseState) {
 fn apply_tag(st: &mut ParseState, tag: &TagPair) {
     let board = &mut st.board;
     match tag.name.as_str() {
-        "Board" => board.number = tag.value.parse::<u32>().ok(),
+        "Board" => {
+            board.number = tag.value.parse::<u32>().ok();
+            if !tag.value.is_empty() {
+                board.board_id = Some(tag.value.clone());
+            }
+        }
         "Dealer" => board.dealer = tag.value.chars().next().and_then(Direction::from_char),
         "Vulnerable" => board.vulnerable = Vulnerability::from_pbn(&tag.value).unwrap_or_default(),
         "Deal" => {
@@ -393,6 +398,19 @@ several lines.}
         assert_eq!(b.extra_tag("Difficulty"), Some("2"));
         // Standard, dedicated-field tags must NOT leak into extra_tags.
         assert!(b.extra_tags.iter().all(|(n, _)| n != "Contract" && n != "Declarer"));
+    }
+
+    #[test]
+    fn test_non_integer_board_id_preserved() {
+        let pbn = r#"
+[Board "1-3"]
+[Dealer "N"]
+[Vulnerable "None"]
+[Deal "N:K843.T542.J6.863 AQJ7.K.Q75.AT942 962.AJ7.KT82.J75 T5.Q9863.A943.KQ"]
+"#;
+        let b = &read_pbn(pbn).unwrap()[0];
+        assert_eq!(b.board_id.as_deref(), Some("1-3"));
+        assert_eq!(b.number, None); // "1-3" is not a u32
     }
 
     #[test]

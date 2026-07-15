@@ -46,8 +46,10 @@ pub fn board_to_pbn(board: &Board) -> String {
         lines.push("[Date \"\"]".to_string());
     }
 
-    // Board number
-    if let Some(num) = board.number {
+    // Board identifier — prefer the raw id (preserves "1-1"), else the number.
+    if let Some(ref id) = board.board_id {
+        lines.push(format!("[Board \"{}\"]", id));
+    } else if let Some(num) = board.number {
         lines.push(format!("[Board \"{}\"]", num));
     }
 
