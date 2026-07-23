@@ -80,7 +80,7 @@ impl<R: BufRead> DealReader<R> {
         }
 
         // Build the lines slice for parse_printall (header + 4 suit lines)
-        let header = format!("   1.\n"); // Dummy header - parse_printall just validates format
+        let header = "   1.\n".to_string(); // Dummy header - parse_printall just validates format
         let all_lines: Vec<&str> = std::iter::once(header.as_str())
             .chain(suit_lines.iter().map(|s| s.as_str()))
             .collect();

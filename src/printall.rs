@@ -48,7 +48,7 @@ pub fn format_printall(deal: &Deal, board_number: usize) -> String {
             cards_count = 0;
 
             let mut cards = deal.hand(dir).cards_in_suit(suit);
-            cards.sort_by(|a, b| b.rank.cmp(&a.rank));
+            cards.sort_by_key(|c| std::cmp::Reverse(c.rank));
 
             if cards.is_empty() {
                 result.push_str("- ");

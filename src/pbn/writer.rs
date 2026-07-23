@@ -54,7 +54,12 @@ pub fn board_to_pbn(board: &Board) -> String {
     }
 
     // Player names (preserve when present, else empty for hand records)
-    for dir in [Direction::West, Direction::North, Direction::East, Direction::South] {
+    for dir in [
+        Direction::West,
+        Direction::North,
+        Direction::East,
+        Direction::South,
+    ] {
         let name = board
             .player_names
             .as_ref()
@@ -79,9 +84,15 @@ pub fn board_to_pbn(board: &Board) -> String {
     lines.push("[Scoring \"\"]".to_string());
     lines.push(format!(
         "[Declarer \"{}\"]",
-        board.declarer.map(|d| d.to_char().to_string()).unwrap_or_default()
+        board
+            .declarer
+            .map(|d| d.to_char().to_string())
+            .unwrap_or_default()
     ));
-    lines.push(format!("[Contract \"{}\"]", board.contract.as_deref().unwrap_or("")));
+    lines.push(format!(
+        "[Contract \"{}\"]",
+        board.contract.as_deref().unwrap_or("")
+    ));
     lines.push(format!(
         "[Result \"{}\"]",
         board.result.map(|r| r.to_string()).unwrap_or_default()
