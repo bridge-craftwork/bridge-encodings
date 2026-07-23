@@ -127,7 +127,7 @@ fn format_hand(hand: &Hand) -> String {
             result.push(String::new());
         } else {
             // Sort by rank descending (Ace first)
-            cards.sort_by(|a, b| b.rank.cmp(&a.rank));
+            cards.sort_by_key(|c| std::cmp::Reverse(c.rank));
             let suit_str: String = cards.iter().map(|c| c.rank.to_char()).collect();
             result.push(suit_str);
         }

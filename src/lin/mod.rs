@@ -145,11 +145,9 @@ pub fn parse_lin(lin_str: &str) -> Result<LinData> {
                     i += 1;
                 }
             }
-            "mc" => {
-                if i + 1 < tokens.len() {
-                    claim = tokens[i + 1].parse().ok();
-                    i += 1;
-                }
+            "mc" if i + 1 < tokens.len() => {
+                claim = tokens[i + 1].parse().ok();
+                i += 1;
             }
             _ => {}
         }

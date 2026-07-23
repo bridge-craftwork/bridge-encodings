@@ -76,11 +76,7 @@ impl ParseState {
         }
         if let Some(leader) = self.play_leader.take() {
             if !self.play_tokens.is_empty() {
-                let trump = self
-                    .board
-                    .contract
-                    .as_deref()
-                    .and_then(contract_trump);
+                let trump = self.board.contract.as_deref().and_then(contract_trump);
                 self.board.play = Some(parse_play(leader, trump, &self.play_tokens));
             }
             self.play_tokens.clear();
@@ -164,7 +160,11 @@ pub fn read_pbn(content: &str) -> Result<Vec<Board>> {
 fn flush_commentary(st: &mut ParseState) {
     let text = st.commentary_buf.join("\n");
     st.commentary_buf.clear();
-    let text = text.trim().trim_start_matches('{').trim_end_matches('}').trim();
+    let text = text
+        .trim()
+        .trim_start_matches('{')
+        .trim_end_matches('}')
+        .trim();
     if !text.is_empty() {
         st.board.commentary.push(text.to_string());
     }
@@ -397,7 +397,10 @@ several lines.}
         assert_eq!(b.extra_tag("SkillPath"), Some("notrump/stayman"));
         assert_eq!(b.extra_tag("Difficulty"), Some("2"));
         // Standard, dedicated-field tags must NOT leak into extra_tags.
-        assert!(b.extra_tags.iter().all(|(n, _)| n != "Contract" && n != "Declarer"));
+        assert!(b
+            .extra_tags
+            .iter()
+            .all(|(n, _)| n != "Contract" && n != "Declarer"));
     }
 
     #[test]
