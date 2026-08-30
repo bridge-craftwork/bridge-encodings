@@ -127,11 +127,26 @@ impl<R: BufRead> Iterator for DealReader<R> {
             }
 
             // Try PBN Deal tag: [Deal "N:..."]
+            //
+            // A line that announces itself as a deal and cannot be read is an
+            // error, not something to skip. Everything else here is skipped on
+            // purpose — metadata, statistics, comments — because the reader
+            // cannot tell those from noise and the caller wants them ignored.
+            // A `[Deal ...]` tag is different: it says what it is. Falling
+            // through left a file of partial boards reading as an empty file,
+            // with nothing anywhere to say a board had been passed over.
             if line.starts_with("[Deal ") {
-                if let Some(deal) = try_parse_pbn_deal_tag(&line) {
-                    self.deals_read += 1;
-                    return Some(Ok(deal));
-                }
+                return Some(match try_parse_pbn_deal_tag(&line) {
+                    Some(deal) => {
+                        self.deals_read += 1;
+                        Ok(deal)
+                    }
+                    None => Err(ParseError::Pbn(format!(
+                        "line {}: {}",
+                        self.line_number,
+                        why_not_a_deal(&line)
+                    ))),
+                });
             }
 
             // Try printall: board number header followed by 4 suit lines
@@ -152,6 +167,53 @@ fn try_parse_pbn_deal_tag(line: &str) -> Option<Deal> {
     let rest = inner.strip_prefix("Deal ")?;
     let value = rest.strip_prefix('"')?.strip_suffix('"')?;
     Deal::from_pbn(value)
+}
+
+/// Why a `[Deal ...]` tag could not be read, in the reader's own words.
+///
+/// `Deal::from_pbn` answers `None` and nothing else, so the reason is worked out
+/// here. It is worth the trouble because the common case is not corruption but a
+/// board that never held four hands: teaching material writes the hands it wants
+/// the student to see and `-` for the rest, and "the board gives 2 of the four
+/// hands" is the difference between a file you can fix and a file you cannot.
+fn why_not_a_deal(line: &str) -> String {
+    let Some(value) = line
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .and_then(|s| s.strip_prefix("Deal "))
+        .and_then(|s| s.strip_prefix('"'))
+        .and_then(|s| s.strip_suffix('"'))
+    else {
+        return "a Deal tag that is not `[Deal \"...\"]`".to_string();
+    };
+
+    let value = value.trim();
+    let Some((first, hands)) = value.split_once(':') else {
+        return format!(
+            "`{value}` does not start with the seat the hands are listed from, as in `N:`"
+        );
+    };
+    if first.len() != 1
+        || bridge_types::Direction::from_char(first.chars().next().unwrap()).is_none()
+    {
+        return format!("`{first}` is not a seat, so there is nothing to list the hands from");
+    }
+
+    let hands: Vec<&str> = hands.split_whitespace().collect();
+    // A whole hand written `-` is unknown, which is legal PBN and not a deal.
+    // (A `-` *within* a holding is a void suit, and reads fine.)
+    let known = hands.iter().filter(|h| **h != "-").count();
+    if known < hands.len() {
+        return format!(
+            "the board gives {} of the four hands and leaves the rest unknown, so it is not a \
+             whole deal",
+            known
+        );
+    }
+    if hands.len() != 4 {
+        return format!("the board gives {} hands rather than four", hands.len());
+    }
+    format!("`{value}` is not a deal this reader can parse")
 }
 
 #[cfg(test)]
@@ -216,6 +278,56 @@ Time needed    0.123 sec
         let deals: Vec<_> = reader.collect();
         assert_eq!(deals.len(), 1);
         assert!(deals[0].is_ok());
+    }
+
+    #[test]
+    fn a_partial_board_is_an_error_rather_than_silence() {
+        // Teaching material writes the hands the student should see and `-` for
+        // the rest. That is legal PBN and not a deal — and skipping it quietly
+        // made a whole file of such boards read as an empty file, with nothing
+        // anywhere to say a board had been passed over.
+        let input = "\
+[Event \"Stayman\"]
+[Board \"1\"]
+[Deal \"W:- KT82.74.AK63.AJ7 - A4.KJ98.T872.865\"]
+";
+        let results: Vec<_> = DealReader::new(Cursor::new(input)).collect();
+        assert_eq!(
+            results.len(),
+            1,
+            "the board should be reported, not skipped"
+        );
+        let err = results[0]
+            .as_ref()
+            .expect_err("not a whole deal")
+            .to_string();
+        assert!(err.contains("line 3"), "should say where: {err}");
+        assert!(err.contains("2 of the four hands"), "should say why: {err}");
+    }
+
+    #[test]
+    fn a_corrupt_deal_tag_is_an_error_too() {
+        let input = "[Deal \"N:AKQJ.AKQ.AKQ.AKQ 432.432.432.5432\"]\n";
+        let results: Vec<_> = DealReader::new(Cursor::new(input)).collect();
+        assert_eq!(results.len(), 1);
+        let err = results[0].as_ref().expect_err("two hands").to_string();
+        assert!(err.contains("2 hands rather than four"), "got: {err}");
+    }
+
+    #[test]
+    fn metadata_around_a_deal_is_still_skipped_in_silence() {
+        // The reader cannot tell metadata from noise, and the caller wants both
+        // ignored — that is what lets raw dealer.exe output be piped in. Only a
+        // line that announces itself as a deal is held to account.
+        let input = "\
+[Event \"Something\"]
+Generated 999 hands
+this is not a deal at all
+[Deal \"N:AKQT3.J6.KJ42.95 652.AK42.AQ87.T4 J74.QT95.T.AK863 98.873.9653.QJ72\"]
+";
+        let results: Vec<_> = DealReader::new(Cursor::new(input)).collect();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_ok(), "the one real deal should read");
     }
 
     #[test]
