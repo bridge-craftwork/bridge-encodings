@@ -389,12 +389,21 @@ fn prevailing_newline(text: &str) -> &'static str {
     }
 }
 
-/// Track `{...}` commentary across a line. Braces do not nest in PBN.
+/// Track `{...}` commentary across a line, following the precedence the
+/// standard gives in section 3.8: braces do not nest; a brace inside a `;`
+/// rest-of-line comment loses its special meaning, as does one inside a tag
+/// pair's quoted value, since a comment may not appear inside a token; and a
+/// `;` inside a brace comment is an ordinary character.
 fn update_braces(line: &str, mut open: bool) -> bool {
+    let mut quoted = false;
     for ch in line.chars() {
         match ch {
-            '{' => open = true,
-            '}' => open = false,
+            // Quotes only delimit a value outside a brace comment.
+            '"' if !open => quoted = !quoted,
+            '{' if !quoted => open = true,
+            '}' if !quoted => open = false,
+            // A rest-of-line comment starts here; nothing after it is special.
+            ';' if !open && !quoted => break,
             _ => {}
         }
     }
@@ -915,5 +924,49 @@ mod tests {
                 .collect();
             assert_eq!(joined, text, "split/join of {text:?}");
         }
+    }
+
+    #[test]
+    fn a_brace_inside_a_semicolon_comment_is_an_ordinary_character() {
+        // Standard 3.8: "Braces appearing inside of semicolon comments lose
+        // their special meaning and are ignored." Treating one as commentary
+        // would swallow the blank line and merge two records into one block,
+        // and an edit aimed at the second board would land on the first.
+        let src = "[Board \"1\"]\n; a note with { an unmatched brace\n\n[Board \"2\"]\n";
+        let mut doc = open(src);
+        assert_eq!(doc.boards().len(), 2);
+        doc.set_tag(1, "Result", "9").unwrap();
+        assert_eq!(
+            doc.to_pbn(),
+            "[Board \"1\"]\n; a note with { an unmatched brace\n\n[Board \"2\"]\n[Result \"9\"]\n"
+        );
+    }
+
+    #[test]
+    fn a_brace_or_semicolon_inside_a_tag_value_is_an_ordinary_character() {
+        // A comment may not appear inside a token (3.8), and real files carry
+        // both: OptimumResultTable's value is semicolon-separated.
+        let src = concat!(
+            "[OptimumResultTable \"Declarer;Denomination\\2R;Result\\2R\"]\n",
+            "N NT 9\n",
+            "[Event \"a { brace in a value\"]\n",
+            "\n",
+            "[Board \"2\"]\n",
+        );
+        let doc = open(src);
+        assert_eq!(doc.boards().len(), 2);
+        assert_eq!(doc.tag_rows(0, "OptimumResultTable"), vec!["N NT 9"]);
+        assert_eq!(doc.to_pbn(), src);
+    }
+
+    #[test]
+    fn a_semicolon_inside_brace_commentary_stays_commentary() {
+        // The converse rule: "A semicolon appearing inside of a brace comment
+        // loses its special meaning", so it must not stop the brace scan and
+        // let the blank line split the record.
+        let src = "[Board \"1\"]\n{open ; semicolon\n\nstill open}\n\n[Board \"2\"]\n";
+        let doc = open(src);
+        assert_eq!(doc.boards().len(), 2);
+        assert_eq!(doc.to_pbn(), src);
     }
 }
