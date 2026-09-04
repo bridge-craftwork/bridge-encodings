@@ -243,9 +243,10 @@ fn direction_tag(dir: Direction) -> &'static str {
     }
 }
 
-/// Format an auction's calls, four per line (one bidding round per line).
+/// Format an auction's calls, four per line (one bidding round per line),
+/// closed by its end marker when it has one.
 fn auction_lines(auction: &Auction) -> Vec<String> {
-    auction
+    let mut lines: Vec<String> = auction
         .calls
         .chunks(4)
         .map(|round| {
@@ -255,12 +256,16 @@ fn auction_lines(auction: &Auction) -> Vec<String> {
                 .collect::<Vec<_>>()
                 .join(" ")
         })
-        .collect()
+        .collect();
+    lines.extend(auction.end.to_pbn().map(str::to_string));
+    lines
 }
 
-/// Format a play sequence, one trick per line in play order.
+/// Format a play sequence, one trick per line in play order, closed by its end
+/// marker when it has one.
 fn play_lines(play: &PlaySequence) -> Vec<String> {
-    play.tricks
+    let mut lines: Vec<String> = play
+        .tricks
         .iter()
         .map(|trick| {
             trick
@@ -272,7 +277,9 @@ fn play_lines(play: &PlaySequence) -> Vec<String> {
                 .join(" ")
         })
         .filter(|l| !l.is_empty())
-        .collect()
+        .collect();
+    lines.extend(play.end.to_pbn().map(str::to_string));
+    lines
 }
 
 /// A card as a PBN token, e.g. `SA`, `HT`, `C2` (ASCII, not suit symbols).
@@ -454,5 +461,35 @@ mod tests {
             assert!(out.contains("[Scoring \"IMP\"]"));
             out = write_pbn(&read_pbn(&out).unwrap());
         }
+    }
+
+    #[test]
+    fn a_section_that_is_only_a_marker_survives_a_round_trip() {
+        use crate::pbn::read_pbn;
+
+        // Previously this wrote back as a bare [Play "W"], which then read as
+        // nothing at all — the section and its opening leader both gone.
+        let pbn = "[Board \"1\"]\n[Play \"W\"]\n*\n";
+        let out = write_pbn(&read_pbn(pbn).unwrap());
+        assert!(out.contains("[Play \"W\"]\n*\n"), "in:\n{out}");
+
+        // And it is stable: cycling again changes nothing.
+        assert_eq!(write_pbn(&read_pbn(&out).unwrap()), out);
+    }
+
+    #[test]
+    fn an_auction_keeps_its_closing_marker() {
+        use crate::pbn::read_pbn;
+
+        let pbn = "[Board \"1\"]\n[Auction \"N\"]\n1NT Pass\n*\n";
+        let out = write_pbn(&read_pbn(pbn).unwrap());
+        assert!(out.contains("[Auction \"N\"]\n1NT Pass\n*\n"), "in:\n{out}");
+        // Notrump is written "NT", per 3.4.14 and 3.5.1.
+        assert!(!out.contains("1N Pass"));
+        assert_eq!(write_pbn(&read_pbn(&out).unwrap()), out);
+
+        // An unmarked auction gains no marker.
+        let pbn = "[Board \"1\"]\n[Auction \"N\"]\n1NT Pass Pass Pass\n";
+        assert!(!write_pbn(&read_pbn(pbn).unwrap()).contains('*'));
     }
 }

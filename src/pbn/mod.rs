@@ -8,5 +8,5 @@ mod reader;
 mod writer;
 
 pub use document::PbnDocument;
-pub use reader::{parse_tag_pair, read_pbn, read_pbn_file, TagPair};
+pub use reader::{parse_tag_line, parse_tag_pair, read_pbn, read_pbn_file, TagPair};
 pub use writer::{board_to_pbn, write_pbn, write_pbn_file};
