@@ -109,10 +109,26 @@ impl PbnDocument {
         let mut blocks = Vec::with_capacity(ranges.len());
         let mut boards = Vec::new();
         let mut board_blocks = Vec::new();
+        // A block carrying no board is still a block a following board's
+        // directives came from, so it is carried forward into the next parse.
+        // That keeps `boards()` exactly what `read_pbn` returns for the whole
+        // file, directives included.
+        let mut carried = String::new();
         for (index, range) in ranges.into_iter().enumerate() {
-            for board in read_pbn(&text[range.clone()])? {
-                boards.push(board);
-                board_blocks.push(index);
+            let block = &text[range.clone()];
+            let parsed = if carried.is_empty() {
+                read_pbn(block)?
+            } else {
+                read_pbn(&format!("{carried}{block}"))?
+            };
+            if parsed.is_empty() {
+                carried.push_str(block);
+            } else {
+                carried.clear();
+                for board in parsed {
+                    boards.push(board);
+                    board_blocks.push(index);
+                }
             }
             blocks.push(Block {
                 range,
@@ -139,7 +155,8 @@ impl PbnDocument {
     /// Board indices address the same records that [`set_tag`](Self::set_tag)
     /// and its companions take. Blocks carrying no tags — a leading `%` header,
     /// a run of blank lines — are not boards and are never addressable; they
-    /// pass through untouched.
+    /// pass through untouched, and their directives appear on the board that
+    /// follows them, exactly as [`read_pbn`](super::read_pbn) reports them.
     pub fn boards(&self) -> &[Board] {
         &self.boards
     }

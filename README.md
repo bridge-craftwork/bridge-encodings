@@ -109,14 +109,27 @@ The PBN (Portable Bridge Notation) format is the standard for bridge data interc
 
 ### Supplemental Tags (read/write)
 - `Event`, `Site`, `Date` - Tournament info
+- `Declarer`, `Contract`, `Result` - Outcome
+- `North`, `East`, `South`, `West` - Player names
 - `DoubleDummyTricks` - DD analysis results
 - `OptimumScore`, `ParContract` - Par calculation
+- Any other tag - preserved verbatim in `Board::extra_tags`, in encounter order
 
-### Not Yet Implemented
-- `Auction` section
-- `Play` section
-- `Result` tag
-- Player name tags
+### Sections (read/write)
+- `Auction` - parsed into a typed `Auction`, with `Note` annotations
+- `Play` - parsed into a typed `PlaySequence`
+- `{...}` commentary blocks - preserved in `Board::commentary`
+
+### Directives and Comments
+
+`%` directives and `;` comments are preserved, not dropped. `%` is where Bridge
+Composer keeps a file's fonts, page setup and colours, so discarding them would
+silently strip a user's page layout. Each one rides on the board whose record it
+sits in, anchored to the tag it followed, and `write_pbn` puts it back there.
+
+The one case a `Vec<Board>` cannot carry is a file with no board records at all —
+a header-only template has no board to hang its directives on. Use `PbnDocument`
+for that, and whenever the file's exact bytes matter.
 
 ## PBN Specification
 

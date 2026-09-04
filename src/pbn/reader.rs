@@ -4,13 +4,15 @@
 //! sections into typed `Auction`/`PlaySequence`, captures `{...}` commentary
 //! blocks, and preserves every tag it does not otherwise model as an
 //! `extra_tags` pair on the board (the PBN spec permits arbitrary supplemental
-//! tags; dropping them is lossy). Board records are terminated by a blank line,
-//! per the PBN standard.
+//! tags; dropping them is lossy). `%` directives and `;` comments are kept too,
+//! each anchored to the tag it followed, so the writer can put them back where
+//! their author had them. Board records are terminated by a blank line, per the
+//! PBN standard.
 
 use crate::error::Result;
 use bridge_types::{
-    Auction, Board, Call, Card, Deal, Direction, PlaySequence, PlayerNames, Rank, Strain, Suit,
-    Vulnerability,
+    Auction, Board, Call, Card, Deal, Direction, Directive, PlaySequence, PlayerNames, Rank,
+    Strain, Suit, Vulnerability,
 };
 
 /// A parsed PBN tag pair
@@ -59,6 +61,9 @@ struct ParseState {
     auction_tokens: Vec<String>,
     play_leader: Option<Direction>,
     play_tokens: Vec<String>,
+    /// Name of the most recent tag in this record, so a `%` or `;` line can be
+    /// anchored to the tag it follows.
+    last_tag: Option<String>,
 }
 
 impl ParseState {
@@ -88,6 +93,17 @@ impl ParseState {
 }
 
 /// Read boards from PBN content
+///
+/// `%` directives and `;` comments ride along on the board whose record they
+/// sit in, anchored to the tag they follow, so [`write_pbn`](super::write_pbn)
+/// can put them back where their author had them. Ones before the first record —
+/// a Bridge Composer file header — are carried by the first board.
+///
+/// The one thing a `Vec<Board>` cannot carry is a file with *no* board records
+/// at all, such as a header-only template: there is no board to hang its
+/// directives on, and they are not returned. Use
+/// [`PbnDocument`](super::PbnDocument) for that, and whenever the file's exact
+/// bytes matter.
 pub fn read_pbn(content: &str) -> Result<Vec<Board>> {
     let mut boards = Vec::new();
     let mut st = ParseState::default();
@@ -111,6 +127,7 @@ pub fn read_pbn(content: &str) -> Result<Vec<Board>> {
                 st.close_sections();
                 boards.push(std::mem::take(&mut st.board));
                 st.has_content = false;
+                st.last_tag = None;
             }
             continue;
         }
@@ -126,8 +143,15 @@ pub fn read_pbn(content: &str) -> Result<Vec<Board>> {
             continue;
         }
 
-        // File directives / line comments — not board content.
+        // File directives and line comments. Not board content, but content
+        // all the same: `%` is where Bridge Composer keeps fonts, page setup
+        // and colours. They ride along on the board whose record they sit in,
+        // anchored to the tag they follow so a writer can put them back.
         if line.starts_with(';') || line.starts_with('%') {
+            st.board.directives.push(Directive {
+                text: line.to_string(),
+                after_tag: st.last_tag.clone(),
+            });
             continue;
         }
 
@@ -136,6 +160,7 @@ pub fn read_pbn(content: &str) -> Result<Vec<Board>> {
             if let Some(tag) = parse_tag_pair(line) {
                 st.close_sections();
                 st.has_content = true;
+                st.last_tag = Some(tag.name.clone());
                 apply_tag(&mut st, &tag);
             }
             continue;
@@ -436,5 +461,102 @@ Pass Pass
         let fc = auction.final_contract().expect("final contract");
         assert_eq!(fc.level, 3);
         assert_eq!(fc.strain, Strain::NoTrump);
+    }
+
+    #[test]
+    fn directives_and_comments_are_kept_and_anchored() {
+        // The shape Bridge Composer and EPBot actually write: a per-board hash
+        // between [Board] and the player names.
+        let pbn = r#"% PBN 2.1
+% Creator "Bridge Composer"
+
+[Event "Club"]
+[Board "1"]
+% 065A62DCF61869AE5D72DF8D408A
+; checked by hand
+[North "EPBot"]
+[Deal "N:K843.T542.J6.863 AQJ7.K.Q75.AT942 962.AJ7.KT82.J75 T5.Q9863.A943.KQ"]
+"#;
+        let b = &read_pbn(pbn).unwrap()[0];
+        // The file header preceded every tag, so it leads the first record.
+        assert_eq!(
+            b.leading_directives().collect::<Vec<_>>(),
+            vec!["% PBN 2.1", "% Creator \"Bridge Composer\""]
+        );
+        assert_eq!(
+            b.directives_after("Board").collect::<Vec<_>>(),
+            vec!["% 065A62DCF61869AE5D72DF8D408A", "; checked by hand"]
+        );
+        assert!(b.directives_after("North").next().is_none());
+        // They are directives, not tags: nothing leaked into extra_tags.
+        assert!(b.extra_tags.is_empty());
+    }
+
+    #[test]
+    fn a_directive_belongs_to_the_record_it_precedes() {
+        let pbn = r#"[Board "1"]
+[Deal "N:K843.T542.J6.863 AQJ7.K.Q75.AT942 962.AJ7.KT82.J75 T5.Q9863.A943.KQ"]
+
+% between the boards
+
+[Board "2"]
+[Deal "E:Q7.AKT9.JT3.JT96 J653.QJ8.A.AQ732 K92.654.K954.K84 AT84.732.Q8762.5"]
+"#;
+        let boards = read_pbn(pbn).unwrap();
+        assert_eq!(boards.len(), 2);
+        assert!(boards[0].directives.is_empty());
+        assert_eq!(
+            boards[1].leading_directives().collect::<Vec<_>>(),
+            vec!["% between the boards"]
+        );
+    }
+
+    #[test]
+    fn a_directive_does_not_start_a_board_or_end_one() {
+        // Directives alone are not board content.
+        assert!(read_pbn("% just a header\n; and a note\n")
+            .unwrap()
+            .is_empty());
+
+        // And one inside an auction does not terminate the section.
+        let pbn = r#"[Board "1"]
+[Auction "N"]
+1NT Pass 3NT Pass
+% mid-auction note
+Pass Pass
+"#;
+        let b = &read_pbn(pbn).unwrap()[0];
+        assert_eq!(b.auction.as_ref().expect("auction parsed").len(), 6);
+        assert_eq!(
+            b.directives_after("Auction").collect::<Vec<_>>(),
+            vec!["% mid-auction note"]
+        );
+    }
+
+    #[test]
+    fn commentary_braces_still_win_over_directives() {
+        // A `%` inside {...} is commentary text, not a directive.
+        let pbn = r#"[Board "1"]
+[Deal "N:K843.T542.J6.863 AQJ7.K.Q75.AT942 962.AJ7.KT82.J75 T5.Q9863.A943.KQ"]
+{Declarer takes
+% not a directive
+all thirteen.}
+"#;
+        let b = &read_pbn(pbn).unwrap()[0];
+        assert!(b.directives.is_empty());
+        assert!(b.commentary[0].contains("% not a directive"));
+    }
+
+    #[test]
+    fn a_file_with_no_boards_has_nothing_to_carry_its_directives() {
+        // A Bridge Composer header template: all directives, no records. There
+        // is no board to hang them on, so this is the one case `Vec<Board>`
+        // cannot round-trip, and `PbnDocument` is the answer.
+        let header = "%Content-type: text/x-pbn\n%BoardsPerPage 1\n%Margins 1000,1000\n";
+        assert!(read_pbn(header).unwrap().is_empty());
+
+        let doc = crate::pbn::PbnDocument::parse(header).unwrap();
+        assert!(doc.boards().is_empty());
+        assert_eq!(doc.to_pbn(), header);
     }
 }
