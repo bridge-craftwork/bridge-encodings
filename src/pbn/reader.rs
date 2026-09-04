@@ -21,7 +21,10 @@ pub struct TagPair {
 }
 
 /// Parse a tag pair from a line: [TagName "value"]
-fn parse_tag_pair(line: &str) -> Option<TagPair> {
+///
+/// Returns `None` for anything that is not a well-formed tag line, so it also
+/// serves as the test for whether a line is one.
+pub fn parse_tag_pair(line: &str) -> Option<TagPair> {
     let line = line.trim();
     if !line.starts_with('[') || !line.ends_with(']') {
         return None;
