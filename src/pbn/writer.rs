@@ -115,7 +115,7 @@ fn board_lines(board: &Board) -> (usize, Vec<String>) {
 
     // Analysis tags if present
     if let Some(ref dd) = board.double_dummy_tricks {
-        out.tag("DoubleDummyTricks", dd);
+        out.tag("DoubleDummyTricks", &super::dd_table_to_pbn(dd));
     }
     if let Some(ref opt) = board.optimum_score {
         out.tag("OptimumScore", opt);

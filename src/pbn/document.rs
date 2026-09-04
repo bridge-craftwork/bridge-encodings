@@ -355,7 +355,22 @@ impl fmt::Display for PbnDocument {
 /// Split `text` into `(content, terminator)` pairs, each line's ending kept
 /// exactly as written. The final pair's terminator is empty when the text ends
 /// without a newline, so rejoining is lossless for LF, CRLF and mixed files.
-fn split_lines(text: &str) -> Vec<(&str, &str)> {
+///
+/// `str::lines` is the wrong tool for editing a file in place: it discards the
+/// terminator, so rejoining with `\n` silently rewrites every CRLF file to LF.
+/// Bridge Composer writes CRLF throughout, so that turns "this only adds lines"
+/// into "this rewrote your whole file".
+///
+/// ```
+/// use bridge_encodings::pbn::split_lines;
+///
+/// let lines = split_lines("a\r\nb\n");
+/// assert_eq!(lines, vec![("a", "\r\n"), ("b", "\n")]);
+/// // Rejoining is exact, mixed endings included.
+/// let rejoined: String = lines.iter().map(|(c, t)| format!("{c}{t}")).collect();
+/// assert_eq!(rejoined, "a\r\nb\n");
+/// ```
+pub fn split_lines(text: &str) -> Vec<(&str, &str)> {
     let mut lines = Vec::new();
     let bytes = text.as_bytes();
     let mut start = 0;
@@ -379,7 +394,15 @@ fn split_lines(text: &str) -> Vec<(&str, &str)> {
 
 /// The line ending most of `text` uses, for inserted lines with no neighbour to
 /// copy from. An empty or single-line file gets `\n`.
-fn prevailing_newline(text: &str) -> &'static str {
+///
+/// ```
+/// use bridge_encodings::pbn::prevailing_newline;
+///
+/// assert_eq!(prevailing_newline("a\r\nb\r\n"), "\r\n");
+/// assert_eq!(prevailing_newline("a\nb\n"), "\n");
+/// assert_eq!(prevailing_newline(""), "\n");
+/// ```
+pub fn prevailing_newline(text: &str) -> &'static str {
     let crlf = text.matches("\r\n").count();
     let lf = text.matches('\n').count() - crlf;
     if crlf > lf {

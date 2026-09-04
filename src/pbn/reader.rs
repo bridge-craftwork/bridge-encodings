@@ -286,7 +286,13 @@ fn apply_tag(st: &mut ParseState, tag: &TagPair) {
                 }
             }
         }
-        "DoubleDummyTricks" => board.double_dummy_tricks = Some(tag.value.clone()),
+        // A malformed value is dropped rather than half-decoded: see
+        // `dd_table_from_pbn`. The tag is not preserved in `extra_tags` either,
+        // since round-tripping a value we could not read would re-emit a
+        // corruption as though it were analysis.
+        "DoubleDummyTricks" => {
+            board.double_dummy_tricks = super::dd_table_from_pbn(&tag.value).ok()
+        }
         "OptimumScore" => board.optimum_score = Some(tag.value.clone()),
         "ParContract" => board.par_contract = Some(tag.value.clone()),
         // Everything else (standard-but-unmodeled + arbitrary custom tags) is

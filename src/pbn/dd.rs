@@ -398,6 +398,43 @@ mod tests {
         assert_eq!(dd_table_to_pbn(&table), "56865568656757867578");
     }
 
+    /// The tag survives a read/write cycle through `Board`'s typed field.
+    #[test]
+    fn the_tag_round_trips_through_a_board() {
+        use crate::pbn::{read_pbn, write_pbn};
+
+        let src = concat!(
+            "[Board \"1\"]\n",
+            "[Deal \"N:62.JT765.AKJ5.Q3 KQ85.Q9.Q876.J75 J9743.K84.T2.K84 AT.A32.943.AT962\"]\n",
+            "[DoubleDummyTricks \"56865568656757867578\"]\n",
+        );
+        let boards = read_pbn(src).unwrap();
+        assert_eq!(
+            boards[0]
+                .double_dummy_tricks
+                .unwrap()
+                .tricks(Direction::North, Strain::Hearts),
+            8
+        );
+        assert!(write_pbn(&boards).contains("[DoubleDummyTricks \"56865568656757867578\"]"));
+    }
+
+    /// A value we cannot read is dropped, not re-emitted as though it were
+    /// analysis.
+    #[test]
+    fn an_unreadable_tag_does_not_survive_as_corruption() {
+        use crate::pbn::{read_pbn, write_pbn};
+
+        let src = concat!(
+            "[Board \"1\"]\n",
+            "[Deal \"N:62.JT765.AKJ5.Q3 KQ85.Q9.Q876.J75 J9743.K84.T2.K84 AT.A32.943.AT962\"]\n",
+            "[DoubleDummyTricks \"nonsense\"]\n",
+        );
+        let boards = read_pbn(src).unwrap();
+        assert!(boards[0].double_dummy_tricks.is_none());
+        assert!(!write_pbn(&boards).contains("DoubleDummyTricks"));
+    }
+
     /// The two encodings must describe the same table.
     #[test]
     fn the_two_encodings_agree() {
