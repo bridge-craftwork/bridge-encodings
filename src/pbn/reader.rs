@@ -12,7 +12,7 @@
 use crate::error::Result;
 use bridge_types::{
     Auction, Board, Call, Card, Deal, Direction, Directive, PlaySequence, PlayerNames, Rank,
-    Strain, Suit, Vulnerability,
+    SectionEnd, Strain, Suit, Vulnerability,
 };
 
 /// A parsed PBN tag pair
@@ -25,27 +25,55 @@ pub struct TagPair {
 /// Parse a tag pair from a line: [TagName "value"]
 ///
 /// Returns `None` for anything that is not a well-formed tag line, so it also
-/// serves as the test for whether a line is one.
+/// serves as the test for whether a line is one. A rest-of-line comment after
+/// the tag does not stop it being one; use [`parse_tag_line`] to get the
+/// comment as well.
 pub fn parse_tag_pair(line: &str) -> Option<TagPair> {
+    parse_tag_line(line).map(|(tag, _)| tag)
+}
+
+/// Parse a tag pair together with any comment trailing it on the same line.
+///
+/// A `;` comment runs to the end of the line and a `{...}` comment may sit
+/// after a tag, and the standard says a comment "refers to the preceding tag" —
+/// so `[Board "1"] ; the first board` is a tag *and* a comment, not a malformed
+/// line. Requiring the line to end in `]` lost both.
+///
+/// The tag is taken to end at the first `]` whose preceding character is the
+/// value's closing quote, which keeps a bracket or quote inside a trailing
+/// comment from being mistaken for the tag's own. Values are returned exactly
+/// as written: the standard escapes a quote inside a value as `\"`, but real
+/// files also use a bare backslash in `OptimumResultTable` column widths, so
+/// decoding escapes here would corrupt them.
+pub fn parse_tag_line(line: &str) -> Option<(TagPair, Option<&str>)> {
     let line = line.trim();
-    if !line.starts_with('[') || !line.ends_with(']') {
-        return None;
-    }
+    let body = line.strip_prefix('[')?;
 
-    let inner = &line[1..line.len() - 1];
+    let close = body
+        .char_indices()
+        .find(|(i, c)| *c == ']' && body[..*i].trim_end().ends_with('"'))
+        .map(|(i, _)| i)?;
+    let inner = &body[..close];
+    let trailing = body[close + 1..].trim();
 
-    // Find the space between tag name and quoted value
-    let space_pos = inner.find(' ')?;
+    // Split the tag name from its quoted value.
+    let space_pos = inner.find(char::is_whitespace)?;
     let name = inner[..space_pos].trim().to_string();
     let rest = inner[space_pos..].trim();
+    let value = rest.strip_prefix('"')?.strip_suffix('"')?.to_string();
 
-    // Extract quoted value
-    if !rest.starts_with('"') || !rest.ends_with('"') {
-        return None;
-    }
-    let value = rest[1..rest.len() - 1].to_string();
-
-    Some(TagPair { name, value })
+    // Only a comment may follow a tag on its line. Anything else means this is
+    // not a tag line after all — files exist that write `[Play "W"]S2`, jamming
+    // section data onto the tag, and calling that a comment would invent one.
+    // A `{` comment counts only when it closes on the same line; an open one
+    // spans lines and belongs to the commentary scanner, not here.
+    let comment = match trailing.chars().next() {
+        None => None,
+        Some(';') => Some(trailing),
+        Some('{') if trailing.contains('}') => Some(trailing),
+        Some(_) => return None,
+    };
+    Some((TagPair { name, value }, comment))
 }
 
 /// Mutable parse state carried across lines within one file.
@@ -157,11 +185,19 @@ pub fn read_pbn(content: &str) -> Result<Vec<Board>> {
 
         // A tag pair closes any open section, then dispatches.
         if line.starts_with('[') {
-            if let Some(tag) = parse_tag_pair(line) {
+            if let Some((tag, comment)) = parse_tag_line(line) {
                 st.close_sections();
                 st.has_content = true;
                 st.last_tag = Some(tag.name.clone());
                 apply_tag(&mut st, &tag);
+                // A comment on the tag's own line refers to that tag, and rides
+                // along on the same board-level list as one on a line of its own.
+                if let Some(text) = comment {
+                    st.board.directives.push(Directive {
+                        text: text.to_string(),
+                        after_tag: st.last_tag.clone(),
+                    });
+                }
             }
             continue;
         }
@@ -271,7 +307,11 @@ fn set_opt(field: &mut Option<String>, value: &str) {
 fn parse_auction(dealer: Direction, tokens: &[String]) -> Auction {
     let mut auction = Auction::new(dealer);
     for tok in tokens {
-        if tok.starts_with('=') || *tok == "*" {
+        if let Some(end) = SectionEnd::from_pbn(tok) {
+            auction.end = end;
+            break;
+        }
+        if tok.starts_with('=') {
             continue;
         }
         if let Some(call) = Call::from_pbn(tok) {
@@ -287,7 +327,8 @@ fn parse_auction(dealer: Direction, tokens: &[String]) -> Auction {
 fn parse_play(leader: Direction, trump: Option<Suit>, tokens: &[String]) -> PlaySequence {
     let mut seq = PlaySequence::new(leader, trump);
     for tok in tokens {
-        if *tok == "*" {
+        if let Some(end) = SectionEnd::from_pbn(tok) {
+            seq.end = end;
             break;
         }
         let Some(card) = parse_card(tok) else {
@@ -558,5 +599,80 @@ all thirteen.}
         let doc = crate::pbn::PbnDocument::parse(header).unwrap();
         assert!(doc.boards().is_empty());
         assert_eq!(doc.to_pbn(), header);
+    }
+
+    #[test]
+    fn a_comment_may_trail_a_tag_on_its_own_line() {
+        let (tag, comment) = parse_tag_line("[Board \"1\"] ; the first board").unwrap();
+        assert_eq!((tag.name.as_str(), tag.value.as_str()), ("Board", "1"));
+        assert_eq!(comment, Some("; the first board"));
+
+        // A brace comment that closes on the same line counts too.
+        let (tag, comment) = parse_tag_line("[Result \"9\"] {made it}").unwrap();
+        assert_eq!(tag.value, "9");
+        assert_eq!(comment, Some("{made it}"));
+
+        // No comment is still a tag.
+        assert_eq!(parse_tag_line("[Board \"1\"]").unwrap().1, None);
+    }
+
+    #[test]
+    fn a_trailing_comment_keeps_the_tag_and_is_anchored_to_it() {
+        // Standard 3.8: a comment "refers to the preceding tag". Before, the
+        // line did not end in `]`, so the tag was dropped along with it.
+        let pbn = "[Board \"1\"] ; the first board\n[Result \"9\"]\n";
+        let b = &read_pbn(pbn).unwrap()[0];
+        assert_eq!(b.board_id.as_deref(), Some("1"));
+        assert_eq!(b.result, Some(9));
+        assert_eq!(
+            b.directives_after("Board").collect::<Vec<_>>(),
+            vec!["; the first board"]
+        );
+    }
+
+    #[test]
+    fn section_data_jammed_onto_a_tag_line_is_not_a_comment() {
+        // Real files write `[Play "W"]S2`. Only a comment may follow a tag, so
+        // calling that trailing text a comment would invent one — and then lose
+        // it again on the next read, since a bare `S2` line is not anything.
+        assert!(parse_tag_line("[Play \"W\"]S2").is_none());
+        assert!(parse_tag_pair("[Play \"W\"]S2").is_none());
+        // An unclosed brace comment belongs to the commentary scanner, not here.
+        assert!(parse_tag_line("[Board \"1\"] {opens here").is_none());
+    }
+
+    #[test]
+    fn a_section_keeps_the_marker_it_closed_with() {
+        // `*` means no further cards will or can be given, so a play section
+        // that is nothing but `*` still has something to say.
+        let pbn = "[Board \"1\"]\n[Play \"W\"]\n*\n";
+        let b = &read_pbn(pbn).unwrap()[0];
+        let play = b.play.as_ref().expect("play section kept");
+        assert_eq!(play.end, SectionEnd::Terminated);
+        assert_eq!(play.opening_leader, Direction::West);
+
+        let pbn = "[Board \"1\"]\n[Auction \"N\"]\n1NT Pass\n*\n";
+        let a = read_pbn(pbn).unwrap()[0]
+            .auction
+            .clone()
+            .expect("auction kept");
+        assert_eq!(a.end, SectionEnd::Terminated);
+        assert_eq!(a.len(), 2);
+
+        // `+` says the next call is to be made another time.
+        let pbn = "[Board \"1\"]\n[Auction \"N\"]\n1NT Pass\n+\n";
+        let a = read_pbn(pbn).unwrap()[0]
+            .auction
+            .clone()
+            .expect("auction kept");
+        assert_eq!(a.end, SectionEnd::Continued);
+
+        // An ordinary auction claims no marker.
+        let pbn = "[Board \"1\"]\n[Auction \"N\"]\n1NT Pass Pass Pass\n";
+        let a = read_pbn(pbn).unwrap()[0]
+            .auction
+            .clone()
+            .expect("auction kept");
+        assert_eq!(a.end, SectionEnd::Unmarked);
     }
 }
