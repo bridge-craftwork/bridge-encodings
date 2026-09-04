@@ -39,6 +39,32 @@ let boards = pbn::read_pbn(pbn_content).unwrap();
 println!("Loaded {} boards", boards.len());
 ```
 
+### Editing PBN Files In Place
+
+`read_pbn` + `write_pbn` re-emit from a typed model, so whitespace, tag order and
+`%` directives do not survive. To *touch up* a file a human authored — change or
+add a tag and leave every other byte exactly as written — use `PbnDocument`,
+which holds the original text and an index into it:
+
+```rust
+use bridge_encodings::pbn::PbnDocument;
+
+let mut doc = PbnDocument::parse_file(path)?;
+for i in 0..doc.boards().len() {
+    doc.set_tag(i, "DoubleDummyTricks", &ddt)?;
+    doc.set_section(i, "OptimumResultTable", "Declarer;Result", &rows)?;
+}
+if doc.is_modified() {
+    doc.write_file(path)?;  // untouched boards keep their original bytes
+}
+```
+
+An unedited document round-trips byte-for-byte — CRLF, mixed endings, a missing
+final newline, `%` directives, `;` comments and `{...}` commentary all included —
+and inserted lines take the line ending the surrounding file uses. Setting a tag
+to the value it already holds leaves `is_modified()` false, so repeated runs over
+a tree rewrite nothing.
+
 ### Writing PBN Files
 
 ```rust
