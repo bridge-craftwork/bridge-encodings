@@ -195,10 +195,11 @@ impl PbnDocument {
     /// of the file alone.
     ///
     /// An existing tag of that name is replaced in place, along with any data
-    /// rows it carried. A new tag is inserted where the standard's tag order
-    /// puts it: among the mandatory tags in their listed order, else
-    /// alphabetically among the supplemental tags, and always ahead of the
-    /// `Auction` and `Play` sections.
+    /// rows it carried — a file's own tag order is never rearranged, only the
+    /// tags this document adds are placed. A new tag is inserted where the
+    /// standard's export order puts it: among the mandatory tags in their
+    /// listed order, else alphabetically among the supplemental tags, and
+    /// always ahead of the `Auction` and `Play` sections.
     ///
     /// Setting a tag to the value it already holds is not a modification; see
     /// [`is_modified`](Self::is_modified).
@@ -218,6 +219,13 @@ impl PbnDocument {
     /// Replacing one replaces the whole span, so the previous rows do not
     /// survive under the new header. Rows are written with the line ending the
     /// surrounding file uses.
+    ///
+    /// A tag with rows is a *section*, and a new one is inserted after the
+    /// game record — after `[Auction]` and `[Play]`, alphabetically among the
+    /// other sections — rather than among the one-line supplemental tags. That
+    /// is where PBN 2.1 section 3.1 puts it and where Bridge Composer moves it
+    /// to; passing no rows makes this exactly [`set_tag`](Self::set_tag),
+    /// placement included.
     ///
     /// # Errors
     ///
@@ -328,7 +336,7 @@ impl PbnDocument {
                 remove_lines(&mut lines, start, end);
             }
             (None, Some(new)) => {
-                let at = insertion_point(&spans, &lines, name);
+                let at = insertion_point(&spans, &lines, name, new.len() > 1);
                 let newline = pick_newline(&lines, at, self.newline).to_string();
                 insert_lines(&mut lines, at, new, &newline);
             }
@@ -518,25 +526,60 @@ fn tag_spans<S: AsRef<str>>(lines: &[(S, S)]) -> Vec<TagSpan> {
     spans
 }
 
-/// Sort key deciding where a new tag lands: the mandatory tags first in the
-/// order the standard lists them, then supplemental tags alphabetically, then
-/// the game-record sections, which must follow every tag they describe.
-fn tag_rank(name: &str) -> (u8, usize, &str) {
+/// Sort key deciding where a new tag lands, in the five groups Bridge Composer
+/// normalises a file into — see `fixtures/bridge-composer/README.md`, which is
+/// the standard's export order (PBN 2.1 sections 3.1 and 3.4) confirmed against
+/// the program:
+///
+/// 1. the 15 mandatory tags, in the order the standard lists them;
+/// 2. supplemental tag pairs, alphabetically, unknown names included;
+/// 3. `Auction` and its calls, then the `Note` tags explaining them;
+/// 4. `Play` and its cards;
+/// 5. supplemental sections, alphabetically among themselves.
+///
+/// `has_rows` is what separates group 2 from group 5, and it is the one thing a
+/// name cannot tell you: `OptimumScore` is a one-line summary while
+/// `OptimumResultTable` is a header and twenty rows, and without that bit the
+/// table sorts in among the summaries, ahead of `[Auction]`, where no exporter
+/// puts it.
+fn tag_rank(name: &str, has_rows: bool) -> (u8, usize, &str) {
     if let Some(position) = MANDATORY_TAGS.iter().position(|tag| *tag == name) {
         return (0, position, "");
     }
     match name {
-        // `Note` annotates the auction it follows, so it sorts with the
-        // sections rather than among the supplemental tags.
-        "Auction" | "Play" | "Note" => (2, 0, name),
+        "Auction" => (2, 0, ""),
+        // Section 3.5.5: the note tags explaining an auction are placed in the
+        // auction section, after its calls, and may not be placed in the
+        // identification section. So `Note` sorts after `Auction` and ahead of
+        // `Play` rather than among the supplemental tags.
+        "Note" => (2, 1, ""),
+        "Play" => (3, 0, ""),
+        // Section 3.1(4): supplemental sections follow the game record.
+        _ if has_rows => (4, 0, name),
         _ => (1, 0, name),
     }
 }
 
-/// The line index a new `name` tag should be inserted at.
-fn insertion_point<S: AsRef<str>>(spans: &[TagSpan], lines: &[(S, S)], name: &str) -> usize {
-    let rank = tag_rank(name);
-    if let Some(span) = spans.iter().find(|span| tag_rank(&span.name) > rank) {
+/// Whether a tag already in the document carries data rows, and so belongs with
+/// the sections rather than the tag pairs. Structural, so a tag is ranked the
+/// same on the pass that inserts it and on every pass that reads it back.
+fn span_has_rows(span: &TagSpan) -> bool {
+    span.end > span.start + 1
+}
+
+/// The line index a new `name` tag should be inserted at. `has_rows` says
+/// whether the caller is writing a section or a bare tag pair.
+fn insertion_point<S: AsRef<str>>(
+    spans: &[TagSpan],
+    lines: &[(S, S)],
+    name: &str,
+    has_rows: bool,
+) -> usize {
+    let rank = tag_rank(name, has_rows);
+    if let Some(span) = spans
+        .iter()
+        .find(|span| tag_rank(&span.name, span_has_rows(span)) > rank)
+    {
         return span.start;
     }
     if let Some(last) = spans.last() {
@@ -762,10 +805,78 @@ mod tests {
 
         let mut doc = open(SAMPLE);
         doc.set_tag(1, "ParContract", "3NT N").unwrap();
-        // Sorts after OptimumResultTable but before SkillPath.
+        // A one-line tag sorts among the tag pairs, so it goes ahead of the
+        // OptimumResultTable *section* even though `P` sorts after `O`.
         assert!(doc
             .to_pbn()
-            .contains("N S  8\n[ParContract \"3NT N\"]\n[SkillPath "));
+            .contains("Q8762.5\"]\n[ParContract \"3NT N\"]\n[OptimumResultTable "));
+    }
+
+    #[test]
+    fn a_new_section_lands_after_the_game_record() {
+        // The bug this replaced: OptimumResultTable and its twenty rows were
+        // ranked as though they were a one-line tag, so the table landed
+        // between DoubleDummyTricks and OptimumScore, ahead of the auction.
+        let src = concat!(
+            "[Board \"1\"]\n",
+            "[Auction \"N\"]\n",
+            "1NT Pass 3NT AP\n",
+            "[Play \"W\"]\n",
+            "S2 S3 S4 SA\n",
+        );
+        let mut doc = open(src);
+        doc.set_section(0, "OptimumResultTable", "Declarer;Result", &["N NT 9"])
+            .unwrap();
+        doc.set_tag(0, "OptimumScore", "NS 400").unwrap();
+        doc.set_tag(0, "DoubleDummyTricks", "AAAA").unwrap();
+        assert_eq!(
+            doc.to_pbn(),
+            concat!(
+                "[Board \"1\"]\n",
+                "[DoubleDummyTricks \"AAAA\"]\n",
+                "[OptimumScore \"NS 400\"]\n",
+                "[Auction \"N\"]\n",
+                "1NT Pass 3NT AP\n",
+                "[Play \"W\"]\n",
+                "S2 S3 S4 SA\n",
+                "[OptimumResultTable \"Declarer;Result\"]\n",
+                "N NT 9\n",
+            )
+        );
+
+        // And sections sort alphabetically among themselves, not by the order
+        // the calls were made in.
+        doc.set_section(0, "AAATable", "Declarer;Result", &["N NT 9"])
+            .unwrap();
+        assert!(doc.to_pbn().contains(concat!(
+            "S2 S3 S4 SA\n",
+            "[AAATable \"Declarer;Result\"]\n",
+            "N NT 9\n",
+            "[OptimumResultTable \"Declarer;Result\"]\n",
+        )));
+    }
+
+    #[test]
+    fn a_note_stays_inside_the_auction_section() {
+        // Standard 3.5.5: the notes explaining an auction are placed in the
+        // auction section, after its calls, and may not be placed in the
+        // identification section. So a Note goes after `[Auction]` and ahead of
+        // `[Play]` — and ahead of the supplemental sections that follow both.
+        let src = concat!(
+            "[Board \"1\"]\n",
+            "[Auction \"N\"]\n",
+            "1NT =1= Pass 3NT AP\n",
+            "[Play \"W\"]\n",
+            "S2 S3 S4 SA\n",
+            "[OptimumResultTable \"Declarer;Result\"]\n",
+            "N NT 9\n",
+        );
+        let mut doc = open(src);
+        doc.set_tag(0, "Note", "1:15-17 balanced").unwrap();
+        assert_eq!(
+            doc.to_pbn(),
+            src.replace("[Play \"W\"]", "[Note \"1:15-17 balanced\"]\n[Play \"W\"]")
+        );
     }
 
     #[test]
@@ -867,10 +978,14 @@ mod tests {
     #[test]
     fn a_file_ending_without_a_newline_still_does() {
         let mut doc = open(SAMPLE);
-        // Sorts after SkillPath, so it appends past the unterminated last line.
-        doc.set_tag(1, "ZTag", "z").unwrap();
+        // A section sorting after OptimumResultTable goes last of all, so it
+        // appends past the unterminated last line.
+        doc.set_section(1, "ZTable", "Declarer;Result", &["W  H 7"])
+            .unwrap();
         let out = doc.to_pbn();
-        assert!(out.ends_with("[SkillPath \"notrump/stayman\"]\n[ZTag \"z\"]"));
+        assert!(
+            out.ends_with("[SkillPath \"notrump/stayman\"]\n[ZTable \"Declarer;Result\"]\nW  H 7")
+        );
         assert!(!out.ends_with('\n'));
 
         // And removing that last line leaves the new last one unterminated.
@@ -980,6 +1095,166 @@ mod tests {
         assert_eq!(doc.boards().len(), 2);
         assert_eq!(doc.tag_rows(0, "OptimumResultTable"), vec!["N NT 9"]);
         assert_eq!(doc.to_pbn(), src);
+    }
+
+    /// The file Bridge Composer 5.118.2 was given: eight boards, the mandatory
+    /// tags deliberately shuffled and the supplemental tags put somewhere
+    /// different in each. See `fixtures/bridge-composer/README.md`.
+    const BC_INPUT: &str = include_str!("../../fixtures/bridge-composer/pbn-order-test.pbn");
+
+    /// What Bridge Composer saved after opening that file and taking a trivial
+    /// edit. It restored the mandatory tags to the standard's order, which is
+    /// the control proving the rest of its layout is normalisation and not the
+    /// input surviving.
+    const BC_OUTPUT: &str = include_str!("../../fixtures/bridge-composer/pbn-order-test-bc.pbn");
+
+    /// A tag whose placement this crate decides: not mandatory, and not part of
+    /// the game record, whose position is fixed by what it describes.
+    fn is_supplemental(name: &str) -> bool {
+        !MANDATORY_TAGS.contains(&name) && !matches!(name, "Auction" | "Play" | "Note")
+    }
+
+    /// The tags of one board whose relative order this crate claims to decide:
+    /// the supplemental ones and the game record they sort around. `BCFlags` is
+    /// Bridge Composer's own bookkeeping, absent from the input, so it is not
+    /// part of the comparison.
+    fn placement_order(doc: &PbnDocument, board: usize) -> Vec<String> {
+        let lines = doc.block_lines(board).expect("board in range");
+        tag_spans(&lines)
+            .into_iter()
+            .map(|span| span.name)
+            .filter(|name| !MANDATORY_TAGS.contains(&name.as_str()) && name != "BCFlags")
+            .collect()
+    }
+
+    #[test]
+    fn bridge_composer_output_is_already_in_rank_order() {
+        // The oracle read directly: whatever Bridge Composer wrote, `tag_rank`
+        // must already agree with, board by board and tag by tag.
+        let doc = open(BC_OUTPUT);
+        assert_eq!(doc.boards().len(), 9, "a template board, then the eight");
+        for board in 0..doc.boards().len() {
+            let lines = doc.block_lines(board).expect("board in range");
+            let spans = tag_spans(&lines);
+            let ranks: Vec<_> = spans
+                .iter()
+                .map(|span| tag_rank(&span.name, span_has_rows(span)))
+                .collect();
+            let mut sorted = ranks.clone();
+            sorted.sort_unstable();
+            assert_eq!(ranks, sorted, "board {board} is not in tag_rank order");
+        }
+    }
+
+    #[test]
+    fn reinserting_every_supplemental_tag_reproduces_bridge_composers_order() {
+        // Strip each board of every tag whose placement is ours to decide, put
+        // them all back in reverse-alphabetical order, and the result must be
+        // the order Bridge Composer produced from the same input.
+        let expected = open(BC_OUTPUT);
+        let mut doc = open(BC_INPUT);
+        assert_eq!(doc.boards().len(), 8);
+        assert_eq!(expected.boards().len(), 9, "BC prepends a template board");
+
+        for board in 0..doc.boards().len() {
+            let mut supplemental: Vec<(String, String, Vec<String>)> = {
+                let lines = doc.block_lines(board).expect("board in range");
+                tag_spans(&lines)
+                    .iter()
+                    .filter(|span| is_supplemental(&span.name))
+                    .map(|span| {
+                        let value = tag_value(lines[span.start].0).unwrap_or_default();
+                        let rows = lines[span.start + 1..span.end]
+                            .iter()
+                            .map(|(content, _)| (*content).to_string())
+                            .collect();
+                        (span.name.clone(), value.to_string(), rows)
+                    })
+                    .collect()
+            };
+            for (name, _, _) in &supplemental {
+                doc.remove_tag(board, name).expect("board in range");
+            }
+            supplemental.sort_by(|left, right| right.0.cmp(&left.0));
+            for (name, value, rows) in &supplemental {
+                let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
+                doc.set_section(board, name, value, &rows)
+                    .expect("a tag taken from the file can be written back");
+            }
+        }
+
+        for board in 0..doc.boards().len() {
+            assert_eq!(
+                placement_order(&doc, board),
+                placement_order(&expected, board + 1),
+                "board {} is not where Bridge Composer put it",
+                board + 1
+            );
+        }
+
+        // Concretely, on the two boards built to probe the edges: unknown
+        // one-line tags sort among the known ones, and a custom section sorts
+        // with the sections, after the auction.
+        assert_eq!(
+            placement_order(&doc, 6),
+            [
+                "AAACustom",
+                "DoubleDummyTricks",
+                "OptimumScore",
+                "ParContract",
+                "ZZZCustom",
+                "Auction",
+                "OptimumResultTable"
+            ]
+        );
+        assert_eq!(
+            placement_order(&doc, 7),
+            [
+                "DoubleDummyTricks",
+                "OptimumScore",
+                "ParContract",
+                "Auction",
+                "AAATable",
+                "OptimumResultTable"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_tag_already_in_the_file_is_never_moved() {
+        // Load-bearing: re-annotating a Bridge Composer file must not rewrite
+        // the order it chose, and real files are not self-consistent. Setting
+        // every supplemental tag of the fixture to the value it already holds
+        // must leave the whole file byte-for-byte unchanged, wherever the tags
+        // happen to sit.
+        let mut doc = open(BC_INPUT);
+        for board in 0..doc.boards().len() {
+            let supplemental: Vec<(String, String, Vec<String>)> = {
+                let lines = doc.block_lines(board).expect("board in range");
+                tag_spans(&lines)
+                    .iter()
+                    .filter(|span| is_supplemental(&span.name))
+                    .map(|span| {
+                        let value = tag_value(lines[span.start].0).unwrap_or_default();
+                        let rows = lines[span.start + 1..span.end]
+                            .iter()
+                            .map(|(content, _)| (*content).to_string())
+                            .collect();
+                        (span.name.clone(), value.to_string(), rows)
+                    })
+                    .collect()
+            };
+            for (name, value, rows) in &supplemental {
+                let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
+                doc.set_section(board, name, value, &rows)
+                    .expect("a tag taken from the file can be written back");
+            }
+        }
+        assert!(
+            !doc.is_modified(),
+            "a no-op re-annotation modified the file"
+        );
+        assert_eq!(doc.to_pbn(), BC_INPUT);
     }
 
     #[test]

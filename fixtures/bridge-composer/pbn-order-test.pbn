@@ -1,0 +1,355 @@
+% PBN 2.1
+% EXPORT
+; Generated to test where Bridge Composer places supplemental tags.
+; The 15 mandatory tags are deliberately SHUFFLED in every board, so that
+; restoring their fixed order proves BC is normalising rather than copying.
+
+[Board "1"]
+[East ""]
+[Date "2026.09.04"]
+[Scoring ""]
+[Event "PBN tag-order experiment"]
+[Contract ""]
+[Dealer "N"]
+[Result ""]
+[Deal "N:62.JT765.AKJ5.Q3 KQ85.Q9.Q876.J75 J9743.K84.T2.K84 AT.A32.943.AT962"]
+[Declarer ""]
+[Vulnerable "None"]
+[North ""]
+[South ""]
+[West ""]
+[Site ""]
+; TEST 1: all four DD tags ABOVE the auction (what bridge-solver writes today)
+[DoubleDummyTricks "56865568656757867578"]
+[OptimumScore "EW -100"]
+[ParContract "EW 2SX-1"]
+[OptimumResultTable "Declarer;Denomination\2R;Result\2R"]
+N NT  5
+N  S  6
+N  H  8
+N  D  6
+N  C  5
+S NT  5
+S  S  6
+S  H  8
+S  D  6
+S  C  5
+E NT  6
+E  S  7
+E  H  5
+E  D  7
+E  C  8
+W NT  6
+W  S  7
+W  H  5
+W  D  7
+W  C  8
+[Auction "N"]
+1NT Pass 3NT AP
+
+[Board "2"]
+[Deal "N:Q7432.85.J983.63 J65.64.AKT5.AK98 AK98.AKQJ7.6.QJ7 T.T932.Q742.T542"]
+[Date "2026.09.04"]
+[Declarer ""]
+[South ""]
+[Site ""]
+[East ""]
+[Event "PBN tag-order experiment"]
+[Scoring ""]
+[Contract ""]
+[West ""]
+[North ""]
+[Vulnerable "NS"]
+[Dealer "N"]
+[Result ""]
+; TEST 2: one-liners above the auction, OptimumResultTable AFTER it
+[DoubleDummyTricks "7a9547a9544248942489"]
+[OptimumScore "EW -300"]
+[ParContract "EW 5CX-2"]
+[Auction "N"]
+1NT Pass 3NT AP
+[OptimumResultTable "Declarer;Denomination\2R;Result\2R"]
+N NT  7
+N  S 10
+N  H  9
+N  D  5
+N  C  4
+S NT  7
+S  S 10
+S  H  9
+S  D  5
+S  C  4
+E NT  4
+E  S  2
+E  H  4
+E  D  8
+E  C  9
+W NT  4
+W  S  2
+W  H  4
+W  D  8
+W  C  9
+
+[Board "3"]
+[East ""]
+[Contract ""]
+[Deal "N:984.AKT62.AJ9.62 AJ7.J873.K8.Q943 QT653.94.T632.KJ K2.Q5.Q754.AT875"]
+[Declarer ""]
+[Date "2026.09.04"]
+[Vulnerable "EW"]
+[Site ""]
+[Result ""]
+[North ""]
+[South ""]
+[West ""]
+[Event "PBN tag-order experiment"]
+[Scoring ""]
+[Dealer "N"]
+; TEST 3: ALL supplementals after the auction, one alphabetical run
+[Auction "N"]
+1NT Pass 3NT AP
+[DoubleDummyTricks "58664586648566975669"]
+[OptimumResultTable "Declarer;Denomination\2R;Result\2R"]
+N NT  5
+N  S  8
+N  H  6
+N  D  6
+N  C  4
+S NT  5
+S  S  8
+S  H  6
+S  D  6
+S  C  4
+E NT  8
+E  S  5
+E  H  6
+E  D  6
+E  C  9
+W NT  7
+W  S  5
+W  H  6
+W  D  6
+W  C  9
+[OptimumScore "NS -100"]
+[ParContract "NS 3SX-1"]
+
+[Board "4"]
+[Deal "N:T84.AQT6.872.JT2 Q3.98542.AKJ5.A5 K952.KJ7.93.K763 AJ76.3.QT64.Q984"]
+[Result ""]
+[Date "2026.09.04"]
+[Contract ""]
+[North ""]
+[West ""]
+[Scoring ""]
+[East ""]
+[Event "PBN tag-order experiment"]
+[Dealer "N"]
+[Vulnerable "All"]
+[South ""]
+[Declarer ""]
+[Site ""]
+; TEST 4: scrambled: reverse-alphabetical, table wedged mid-block
+[ParContract "EW 1D+3"]
+[OptimumResultTable "Declarer;Denomination\2R;Result\2R"]
+N NT  5
+N  S  4
+N  H  5
+N  D  2
+N  C  4
+S NT  5
+S  S  4
+S  H  5
+S  D  2
+S  C  4
+E NT  8
+E  S  8
+E  H  7
+E  D 10
+E  C  8
+W NT  8
+W  S  8
+W  H  7
+W  D 10
+W  C  8
+[OptimumScore "EW 130"]
+[DoubleDummyTricks "5452454524887a8887a8"]
+[Auction "N"]
+1NT Pass 3NT AP
+
+[Board "5"]
+[Scoring ""]
+[Declarer ""]
+[Dealer "N"]
+[East ""]
+[Deal "N:KJ86.KQ9.T3.JT76 QT53.JT74.87.A93 -.A83.AQJ642.K542 A9742.652.K95.Q8"]
+[Vulnerable "None"]
+[West ""]
+[Site ""]
+[Date "2026.09.04"]
+[Result ""]
+[Event "PBN tag-order experiment"]
+[North ""]
+[Contract ""]
+[South ""]
+; TEST 5: no auction, no play - baseline
+[DoubleDummyTricks "967aa868aa4753347533"]
+[OptimumScore "NS 400"]
+[ParContract "NS 3N="]
+[OptimumResultTable "Declarer;Denomination\2R;Result\2R"]
+N NT  9
+N  S  6
+N  H  7
+N  D 10
+N  C 10
+S NT  8
+S  S  6
+S  H  8
+S  D 10
+S  C 10
+E NT  4
+E  S  7
+E  H  5
+E  D  3
+E  C  3
+W NT  4
+W  S  7
+W  H  5
+W  D  3
+W  C  3
+
+[Board "6"]
+[Site ""]
+[Result ""]
+[North ""]
+[Deal "N:A42.KT952.Q97.63 T83.7.8432.AQJ52 KJ6.843.K65.K984 Q975.AQJ6.AJT.T7"]
+[Declarer "S"]
+[Dealer "N"]
+[Scoring ""]
+[South ""]
+[West ""]
+[Date "2026.09.04"]
+[East ""]
+[Event "PBN tag-order experiment"]
+[Contract "3NT"]
+[Vulnerable "NS"]
+; TEST 6: auction AND play, table between them
+[DoubleDummyTricks "65755758556857867588"]
+[OptimumScore "EW 110"]
+[ParContract "EW 2S="]
+[Auction "N"]
+1NT Pass 3NT AP
+[OptimumResultTable "Declarer;Denomination\2R;Result\2R"]
+N NT  6
+N  S  5
+N  H  7
+N  D  5
+N  C  5
+S NT  7
+S  S  5
+S  H  8
+S  D  5
+S  C  5
+E NT  6
+E  S  8
+E  H  5
+E  D  7
+E  C  8
+W NT  6
+W  S  7
+W  H  5
+W  D  8
+W  C  8
+[Play "W"]
+SQ
+*
+
+[Board "7"]
+[Deal "N:J742.AK.KT64.KT3 T986.85.A875.Q85 AQ5.QJT72.J.A642 K3.9643.Q932.J97"]
+[East ""]
+[Event "PBN tag-order experiment"]
+[Contract ""]
+[Scoring ""]
+[Date "2026.09.04"]
+[Dealer "N"]
+[Declarer ""]
+[Site ""]
+[South ""]
+[West ""]
+[Result ""]
+[Vulnerable "EW"]
+[North ""]
+; TEST 7: custom one-liners AAA/ZZZ around the DD tags
+[AAACustom "first"]
+[DoubleDummyTricks "9aa8a9aa8a2324323243"]
+[OptimumScore "NS 420"]
+[ParContract "NS 4H="]
+[ZZZCustom "last"]
+[OptimumResultTable "Declarer;Denomination\2R;Result\2R"]
+N NT  9
+N  S 10
+N  H 10
+N  D  8
+N  C 10
+S NT  9
+S  S 10
+S  H 10
+S  D  8
+S  C 10
+E NT  2
+E  S  3
+E  H  2
+E  D  4
+E  C  3
+W NT  2
+W  S  3
+W  H  2
+W  D  4
+W  C  3
+[Auction "N"]
+1NT Pass 3NT AP
+
+[Board "8"]
+[Event "PBN tag-order experiment"]
+[Dealer "N"]
+[West ""]
+[North ""]
+[East ""]
+[Site ""]
+[South ""]
+[Date "2026.09.04"]
+[Declarer ""]
+[Deal "N:Q95.AJ754.-.KQ865 AT43.-.KQJ72.JT94 J72.K6.A9863.A73 K86.QT9832.T54.2"]
+[Result ""]
+[Vulnerable "All"]
+[Contract ""]
+[Scoring ""]
+; TEST 8: two tables: a custom one sorting BEFORE OptimumResultTable
+[DoubleDummyTricks "86869868695757456574"]
+[OptimumScore "NS 120"]
+[ParContract "NS 1N+1"]
+[AAATable "Declarer;Result\2R"]
+N  1
+S  2
+[OptimumResultTable "Declarer;Denomination\2R;Result\2R"]
+N NT  8
+N  S  6
+N  H  8
+N  D  6
+N  C  9
+S NT  8
+S  S  6
+S  H  8
+S  D  6
+S  C  9
+E NT  5
+E  S  7
+E  H  5
+E  D  7
+E  C  4
+W NT  5
+W  S  6
+W  H  5
+W  D  7
+W  C  4
+[Auction "N"]
+1NT Pass 3NT AP
