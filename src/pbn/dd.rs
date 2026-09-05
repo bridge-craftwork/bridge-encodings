@@ -51,7 +51,37 @@ const COLUMN_ORDER: [Strain; 5] = [
 
 /// The header value of an `OptimumResultTable` section, naming its three
 /// columns and their field widths as PBN 2.1 §5.7 defines them.
-pub const OPTIMUM_RESULT_TABLE_HEADER: &str = "Declarer;Denomination\\2R;Result\\2R";
+///
+/// The `Result` column's minimum width depends on the table: `1` when every
+/// declarer takes nine tricks or fewer, `2` when any cell reaches ten. Bridge
+/// Composer 5.118 does exactly this — verified against its own output on eight
+/// boards, four of each width, with no exceptions.
+///
+/// Matching it is not decoration. A file we annotate with a fixed `\2R` gets its
+/// header rewritten the moment someone opens and saves it in Bridge Composer,
+/// so every single-digit board churns on a round trip through the tool most of
+/// these files live in.
+///
+/// `Declarer` carries no width (one character) and `Denomination` is always
+/// `\2R`, since `NT` is two characters wide whatever the results are.
+///
+/// ```
+/// use bridge_encodings::pbn::optimum_result_table_header;
+/// use bridge_types::{DdTable, Direction, Strain};
+///
+/// let mut table = DdTable::new();
+/// assert!(optimum_result_table_header(&table).ends_with("Result\\1R"));
+/// table.set(Direction::North, Strain::Clubs, 10);
+/// assert!(optimum_result_table_header(&table).ends_with("Result\\2R"));
+/// ```
+pub fn optimum_result_table_header(table: &DdTable) -> String {
+    let width = if table.cells().any(|(_, _, tricks)| tricks > 9) {
+        2
+    } else {
+        1
+    };
+    format!("Declarer;Denomination\\2R;Result\\{width}R")
+}
 
 /// Encode a table as a `DoubleDummyTricks` tag value: twenty characters, one
 /// per cell, in [`ROW_ORDER`] then [`COLUMN_ORDER`].
@@ -110,7 +140,7 @@ pub fn dd_table_from_pbn(value: &str) -> Result<DdTable> {
 /// The twenty data rows of an `OptimumResultTable` section, in
 /// [`ROW_ORDER`] then [`COLUMN_ORDER`], formatted to the header's field widths.
 ///
-/// Pair with [`OPTIMUM_RESULT_TABLE_HEADER`] and
+/// Pair with [`optimum_result_table_header`] and
 /// `PbnDocument::set_section`.
 pub fn optimum_result_table_rows(table: &DdTable) -> Vec<String> {
     let mut rows = Vec::with_capacity(20);
@@ -319,6 +349,23 @@ mod tests {
         let rows = optimum_result_table_rows(&table);
         assert_eq!(rows.len(), 20);
         assert_eq!(optimum_result_table_from_rows(&rows).unwrap(), table);
+    }
+
+    /// The width rule, against Bridge Composer 5.118's own output.
+    #[test]
+    fn result_column_narrows_when_no_cell_reaches_ten() {
+        let mut table = DdTable::new();
+        table.set(Direction::North, Strain::NoTrump, 9);
+        assert_eq!(
+            optimum_result_table_header(&table),
+            "Declarer;Denomination\\2R;Result\\1R"
+        );
+
+        table.set(Direction::West, Strain::Clubs, 10);
+        assert_eq!(
+            optimum_result_table_header(&table),
+            "Declarer;Denomination\\2R;Result\\2R"
+        );
     }
 
     #[test]
