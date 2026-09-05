@@ -75,12 +75,23 @@ const COLUMN_ORDER: [Strain; 5] = [
 /// assert!(optimum_result_table_header(&table).ends_with("Result\\2R"));
 /// ```
 pub fn optimum_result_table_header(table: &DdTable) -> String {
-    let width = if table.cells().any(|(_, _, tricks)| tricks > 9) {
+    format!("Declarer;Denomination\\2R;Result\\{}R", result_width(table))
+}
+
+/// The `Result` column's minimum width for this table: 2 once any declarer
+/// reaches ten tricks, otherwise 1.
+///
+/// Private and shared by [`optimum_result_table_header`] and
+/// [`optimum_result_table_rows`], because a header that declares one width
+/// while its rows are padded to another is worse than either alone -- it is
+/// what shipped briefly, and Bridge Composer reformatted all twenty rows on
+/// the next save.
+fn result_width(table: &DdTable) -> usize {
+    if table.cells().any(|(_, _, tricks)| tricks > 9) {
         2
     } else {
         1
-    };
-    format!("Declarer;Denomination\\2R;Result\\{width}R")
+    }
 }
 
 /// Encode a table as a `DoubleDummyTricks` tag value: twenty characters, one
@@ -138,16 +149,31 @@ pub fn dd_table_from_pbn(value: &str) -> Result<DdTable> {
 }
 
 /// The twenty data rows of an `OptimumResultTable` section, in
-/// [`ROW_ORDER`] then [`COLUMN_ORDER`], formatted to the header's field widths.
+/// [`ROW_ORDER`] then [`COLUMN_ORDER`], right-aligned to the field widths
+/// [`optimum_result_table_header`] declares for the same table.
 ///
-/// Pair with [`optimum_result_table_header`] and
-/// `PbnDocument::set_section`.
+/// The `Result` column narrows to one character when no declarer reaches ten,
+/// which is what Bridge Composer writes; see [`result_width`]. Pair with
+/// [`optimum_result_table_header`] and `PbnDocument::set_section`.
+///
+/// ```
+/// use bridge_encodings::pbn::optimum_result_table_rows;
+/// use bridge_types::{DdTable, Direction, Strain};
+///
+/// let mut table = DdTable::new();
+/// table.set(Direction::North, Strain::NoTrump, 5);
+/// assert_eq!(optimum_result_table_rows(&table)[0], "N NT 5");
+///
+/// table.set(Direction::West, Strain::Clubs, 10);
+/// assert_eq!(optimum_result_table_rows(&table)[0], "N NT  5");
+/// ```
 pub fn optimum_result_table_rows(table: &DdTable) -> Vec<String> {
+    let width = result_width(table);
     let mut rows = Vec::with_capacity(20);
     for declarer in ROW_ORDER {
         for strain in COLUMN_ORDER {
             rows.push(format!(
-                "{} {:>2} {:>2}",
+                "{} {:>2} {:>width$}",
                 declarer.to_char(),
                 strain_token(strain),
                 table.tricks(declarer, strain)
@@ -368,14 +394,52 @@ mod tests {
         );
     }
 
+    /// Byte-for-byte against Bridge Composer 5.118.2's own output, both widths.
+    /// The fixtures these come from are in bridge-solver's
+    /// `fixtures/bridge-composer/`.
     #[test]
     fn optimum_result_rows_are_the_shape_bridge_composer_writes() {
-        let mut table = DdTable::new();
-        table.set(Direction::North, Strain::NoTrump, 9);
-        table.set(Direction::North, Strain::Spades, 7);
-        let rows = optimum_result_table_rows(&table);
+        // Narrow: no declarer reaches ten, so the Result column is one wide.
+        let mut narrow = DdTable::new();
+        narrow.set(Direction::North, Strain::NoTrump, 5);
+        narrow.set(Direction::North, Strain::Spades, 6);
+        let rows = optimum_result_table_rows(&narrow);
+        assert_eq!(rows[0], "N NT 5");
+        assert_eq!(rows[1], "N  S 6");
+
+        // Wide: one cell reaches ten, so every result is padded to two.
+        let mut wide = DdTable::new();
+        wide.set(Direction::North, Strain::NoTrump, 9);
+        wide.set(Direction::North, Strain::Spades, 10);
+        let rows = optimum_result_table_rows(&wide);
         assert_eq!(rows[0], "N NT  9");
-        assert_eq!(rows[1], "N  S  7");
+        assert_eq!(rows[1], "N  S 10");
+    }
+
+    /// The header cannot promise a width the rows do not honour. This is the
+    /// pairing that shipped broken for an hour: a `\1R` header over rows still
+    /// padded to two, so Bridge Composer reformatted all twenty on the next
+    /// save.
+    #[test]
+    fn header_width_and_row_width_agree() {
+        for max in [9u8, 10] {
+            let mut table = DdTable::new();
+            table.set(Direction::West, Strain::Clubs, max);
+            let declared: usize = optimum_result_table_header(&table)
+                .rsplit_once("Result\\")
+                .and_then(|(_, w)| w.trim_end_matches('R').parse().ok())
+                .expect("header names a Result width");
+            // Each row is `{declarer} {denomination:>2} {result:>width}`, so
+            // the prefix is a fixed five characters and the rest is the field
+            // whose width the header just declared.
+            for row in optimum_result_table_rows(&table) {
+                assert_eq!(
+                    row.len() - 5,
+                    declared,
+                    "row {row:?} against declared width {declared}"
+                );
+            }
+        }
     }
 
     /// Rows carry their own coordinates, so order is not load-bearing.
