@@ -1,10 +1,11 @@
 //! PBN file reader.
 //!
 //! Section-aware: besides the scalar tags, it parses the `Auction` and `Play`
-//! sections into typed `Auction`/`PlaySequence`, captures `{...}` commentary
-//! blocks, and preserves every tag it does not otherwise model as an
-//! `extra_tags` pair on the board (the PBN spec permits arbitrary supplemental
-//! tags; dropping them is lossy). `%` directives and `;` comments are kept too,
+//! sections into typed `Auction`/`PlaySequence`, decodes an
+//! `OptimumResultTable` section into the board's double-dummy table, captures
+//! `{...}` commentary blocks, and preserves every tag it does not otherwise
+//! model as an `extra_tags` pair on the board (the PBN spec permits arbitrary
+//! supplemental tags; dropping them is lossy). `%` directives and `;` comments are kept too,
 //! each anchored to the tag it followed, so the writer can put them back where
 //! their author had them. Board records are terminated by a blank line, per the
 //! PBN standard.
@@ -89,6 +90,15 @@ struct ParseState {
     auction_tokens: Vec<String>,
     play_leader: Option<Direction>,
     play_tokens: Vec<String>,
+    // `OptimumResultTable` is a section too: the tag opens it and its twenty
+    // rows follow, so it accumulates the same way.
+    in_optimum: bool,
+    optimum_rows: Vec<String>,
+    /// Set once this board's table has been read from `OptimumResultTable`, so
+    /// a `DoubleDummyTricks` tag later in the record does not overwrite it.
+    /// The two encodings are redundant by design and only one of them has a
+    /// specification to be checked against; see [`super::dd`].
+    dd_from_optimum: bool,
     /// Name of the most recent tag in this record, so a `%` or `;` line can be
     /// anchored to the tag it follows.
     last_tag: Option<String>,
@@ -116,6 +126,18 @@ impl ParseState {
                 self.board.play = Some(parse_play(leader, trump, &self.play_tokens));
             }
             self.play_tokens.clear();
+        }
+        if std::mem::take(&mut self.in_optimum) {
+            let rows = std::mem::take(&mut self.optimum_rows);
+            // A malformed section is dropped rather than half-decoded, for the
+            // reason `dd_table_from_pbn` gives: a half-populated table carries
+            // a producer/reader disagreement silently into whatever displays
+            // it. Dropping it leaves any `DoubleDummyTricks` table already
+            // read in place, which is the readable half of the pair.
+            if let Ok(table) = super::optimum_result_table_from_rows(&rows) {
+                self.board.double_dummy_tricks = Some(table);
+                self.dd_from_optimum = true;
+            }
         }
     }
 }
@@ -156,6 +178,7 @@ pub fn read_pbn(content: &str) -> Result<Vec<Board>> {
                 boards.push(std::mem::take(&mut st.board));
                 st.has_content = false;
                 st.last_tag = None;
+                st.dd_from_optimum = false;
             }
             continue;
         }
@@ -209,6 +232,8 @@ pub fn read_pbn(content: &str) -> Result<Vec<Board>> {
         } else if st.in_play() {
             st.play_tokens
                 .extend(line.split_whitespace().map(str::to_string));
+        } else if st.in_optimum {
+            st.optimum_rows.push(line.to_string());
         }
     }
 
@@ -291,8 +316,18 @@ fn apply_tag(st: &mut ParseState, tag: &TagPair) {
         // since round-tripping a value we could not read would re-emit a
         // corruption as though it were analysis.
         "DoubleDummyTricks" => {
-            board.double_dummy_tricks = super::dd_table_from_pbn(&tag.value).ok()
+            // `OptimumResultTable` wins when a board carries both: it is the
+            // encoding PBN 2.1 section 5.7 defines, and the two are redundant
+            // by design. Sections close before the next tag is applied, so a
+            // table read from either order of the pair is honoured.
+            if !st.dd_from_optimum {
+                board.double_dummy_tricks = super::dd_table_from_pbn(&tag.value).ok();
+            }
         }
+        // The rows follow; `close_sections` decodes them. Not preserved in
+        // `extra_tags`: the header alone, with its rows consumed, would be
+        // re-emitted as an empty section.
+        "OptimumResultTable" => st.in_optimum = true,
         "OptimumScore" => board.optimum_score = Some(tag.value.clone()),
         "ParContract" => board.par_contract = Some(tag.value.clone()),
         // Everything else (standard-but-unmodeled + arbitrary custom tags) is
@@ -381,6 +416,9 @@ pub fn read_pbn_file(path: &std::path::Path) -> Result<Vec<Board>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bridge_types::DdTable;
+
+    use crate::pbn::{dd_table_from_pbn, optimum_result_table_header, optimum_result_table_rows};
 
     #[test]
     fn test_parse_tag_pair() {
@@ -680,5 +718,118 @@ all thirteen.}
             .clone()
             .expect("auction kept");
         assert_eq!(a.end, SectionEnd::Unmarked);
+    }
+
+    /// A board record carrying an `OptimumResultTable` section built from
+    /// `table`, header and all, as a producer would write it.
+    fn with_optimum_table(table: &DdTable, extra: &str) -> String {
+        let mut text = format!(
+            "[Board \"1\"]\n{extra}[OptimumResultTable \"{}\"]\n",
+            optimum_result_table_header(table)
+        );
+        for row in optimum_result_table_rows(table) {
+            text.push_str(&row);
+            text.push('\n');
+        }
+        text
+    }
+
+    /// A table with no two cells alike, so an assertion about which encoding
+    /// was read cannot pass by coincidence.
+    fn counted_table() -> DdTable {
+        let mut n = 0u8;
+        DdTable::from_fn(|_, _| {
+            n += 1;
+            n % 14
+        })
+    }
+
+    #[test]
+    fn an_optimum_result_table_alone_fills_the_double_dummy_table() {
+        // The standard encoding, PBN 2.1 section 5.7. Before, a board carrying
+        // only this came back with no table at all and its analysis was lost.
+        let table = counted_table();
+        let b = &read_pbn(&with_optimum_table(&table, "")).unwrap()[0];
+        assert_eq!(b.double_dummy_tricks.as_ref(), Some(&table));
+        // The header is not left in `extra_tags`: its rows are consumed here,
+        // and a writer would re-emit it as an empty section.
+        assert!(b.extra_tags.iter().all(|(n, _)| n != "OptimumResultTable"));
+    }
+
+    #[test]
+    fn optimum_result_table_wins_over_double_dummy_tricks() {
+        // The two are redundant by design, so a file may carry both. Only
+        // `OptimumResultTable` has a specification to be checked against, so it
+        // is the one honoured — in either order, since a section closes before
+        // the next tag is applied. The values disagree deliberately: every cell
+        // of the tag says four tricks, and no cell of the table does.
+        let table = counted_table();
+        let tricks = "[DoubleDummyTricks \"44444444444444444444\"]\n";
+
+        let before = read_pbn(&with_optimum_table(&table, tricks)).unwrap();
+        assert_eq!(before[0].double_dummy_tricks.as_ref(), Some(&table));
+
+        let after = read_pbn(&format!("{}{tricks}", with_optimum_table(&table, ""))).unwrap();
+        assert_eq!(after[0].double_dummy_tricks.as_ref(), Some(&table));
+    }
+
+    #[test]
+    fn optimum_rows_may_arrive_in_any_order() {
+        // Each row names its own declarer and denomination, so the order they
+        // are written in carries nothing.
+        let table = counted_table();
+        let written = with_optimum_table(&table, "");
+        let mut lines: Vec<&str> = written.lines().collect();
+        let rows = lines.split_off(2);
+        lines.extend(rows.into_iter().rev());
+
+        let b = &read_pbn(&format!("{}\n", lines.join("\n"))).unwrap()[0];
+        assert_eq!(b.double_dummy_tricks.as_ref(), Some(&table));
+    }
+
+    #[test]
+    fn the_two_encodings_agree_on_a_real_bridge_composer_file() {
+        // Every board of Bridge Composer's own output carries both tags, and
+        // its help says its Double Dummy commands keep them in step. Since the
+        // section now wins, this compares the table decoded from the standard
+        // rows against the compact tag the same board was written with — the
+        // two decoders' cell orders checked against each other on real data.
+        let text = include_str!("../../fixtures/bridge-composer/pbn-order-test-bc.pbn");
+        let doc = crate::pbn::PbnDocument::parse(text).unwrap();
+        let mut compared = 0;
+        for (index, board) in doc.boards().iter().enumerate() {
+            let Some(value) = doc.tag(index, "DoubleDummyTricks") else {
+                continue;
+            };
+            let from_tag = dd_table_from_pbn(value).unwrap();
+            assert_eq!(
+                board.double_dummy_tricks.as_ref(),
+                Some(&from_tag),
+                "board {index}: the section and the tag disagree"
+            );
+            compared += 1;
+        }
+        assert_eq!(compared, 8, "a template board, then the eight");
+    }
+
+    #[test]
+    fn a_short_optimum_result_table_is_dropped_not_half_decoded() {
+        // Nineteen of the twenty cells. A half-populated table would carry a
+        // producer/reader disagreement silently into whatever displayed it, so
+        // the section goes; the readable `DoubleDummyTricks` tag still stands.
+        let table = counted_table();
+        let short: String = with_optimum_table(&table, "")
+            .lines()
+            .take(21)
+            .map(|line| format!("{line}\n"))
+            .collect();
+        assert!(read_pbn(&short).unwrap()[0].double_dummy_tricks.is_none());
+
+        let tricks = "[DoubleDummyTricks \"44444444444444444444\"]\n";
+        let b = &read_pbn(&format!("{short}{tricks}")).unwrap()[0];
+        assert_eq!(
+            b.double_dummy_tricks.as_ref(),
+            Some(&dd_table_from_pbn("44444444444444444444").unwrap())
+        );
     }
 }
