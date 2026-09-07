@@ -14,6 +14,9 @@ pub enum ParseError {
     #[error("Oneline parse error: {0}")]
     Oneline(String),
 
+    #[error("ZRD parse error: {0}")]
+    Zrd(String),
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 }

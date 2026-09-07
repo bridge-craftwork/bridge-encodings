@@ -4,6 +4,7 @@
 //! - **PBN** (Portable Bridge Notation) - Standard format for bridge records
 //! - **LIN** - BBO (Bridge Base Online) hand record format
 //! - **Oneline** - Simple format used by dealer.exe
+//! - **ZRD/ZDD** - Pavlicek's binary deal and double-dummy library
 //!
 //! # Example
 //!
@@ -27,6 +28,7 @@ pub mod oneline;
 pub mod pbn;
 pub mod printall;
 mod reader;
+pub mod zrd;
 
 pub use error::{ParseError, Result};
 pub use reader::DealReader;
