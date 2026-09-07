@@ -366,6 +366,13 @@ struct RecordFile<R> {
     inner: R,
     stride: u64,
     records: u64,
+    /// The ordinal the stream is positioned at, when that is known.
+    ///
+    /// Reading a record in sequence is the common case, and seeking for each
+    /// one would throw away the buffering underneath — a full pass over the
+    /// published library is ten million reads. So a read that is already in
+    /// position skips the seek.
+    cursor: Option<u64>,
 }
 
 impl<R: Read + Seek> RecordFile<R> {
@@ -382,6 +389,8 @@ impl<R: Read + Seek> RecordFile<R> {
             inner,
             stride,
             records: bytes / stride,
+            // Positioned at the end by the measurement above.
+            cursor: None,
         })
     }
 
@@ -392,8 +401,14 @@ impl<R: Read + Seek> RecordFile<R> {
                 self.records
             )));
         }
-        self.inner.seek(SeekFrom::Start(index * self.stride))?;
+        if self.cursor != Some(index) {
+            self.inner.seek(SeekFrom::Start(index * self.stride))?;
+        }
+        // Leave the cursor unknown until the read lands, so a failed read does
+        // not strand it pointing at a record that was never consumed.
+        self.cursor = None;
         self.inner.read_exact(buf)?;
+        self.cursor = Some(index + 1);
         Ok(())
     }
 }
@@ -741,6 +756,32 @@ mod tests {
             let record = reader.record(index as u64).unwrap();
             assert_eq!(identity(&record), sequential[index], "record {index}");
         }
+    }
+
+    /// Sequential reads skip the seek, so a jump has to reinstate it.
+    #[test]
+    fn seeking_and_sequential_reads_interleave_correctly() {
+        let mut reader = ZrdReader::new(Cursor::new(FIXTURE)).unwrap();
+        let all: Vec<(String, Option<DdTable>)> = (0..10)
+            .map(|index| identity(&reader.record(index).unwrap()))
+            .collect();
+
+        // Read 0 and 1 in sequence, jump back to 0, then carry on from 1.
+        assert_eq!(identity(&reader.record(0).unwrap()), all[0]);
+        assert_eq!(identity(&reader.record(1).unwrap()), all[1]);
+        assert_eq!(identity(&reader.record(0).unwrap()), all[0]);
+        assert_eq!(identity(&reader.record(1).unwrap()), all[1]);
+        assert_eq!(identity(&reader.record(9).unwrap()), all[9]);
+    }
+
+    /// A failed read must not leave the cursor claiming a position it never
+    /// reached, or the next sequential read would silently skip the seek.
+    #[test]
+    fn a_read_past_the_end_does_not_strand_the_cursor() {
+        let mut reader = ZrdReader::new(Cursor::new(FIXTURE)).unwrap();
+        let expected = identity(&reader.record(3).unwrap());
+        assert!(reader.record(10).is_err());
+        assert_eq!(identity(&reader.record(3).unwrap()), expected);
     }
 
     #[test]
