@@ -173,6 +173,9 @@ fn try_parse_pbn_deal_tag(line: &str) -> Option<Deal> {
     Deal::from_pbn(value)
 }
 
+/// Cards in a whole hand.
+const HAND_SIZE: usize = 13;
+
 /// Why a `[Deal ...]` tag could not be read, in the reader's own words.
 ///
 /// `Deal::from_pbn` answers `None` and nothing else, so the reason is worked out
@@ -180,9 +183,6 @@ fn try_parse_pbn_deal_tag(line: &str) -> Option<Deal> {
 /// board that never held four hands: teaching material writes the hands it wants
 /// the student to see and `-` for the rest, and "the board gives 2 of the four
 /// hands" is the difference between a file you can fix and a file you cannot.
-/// Cards in a whole hand.
-const HAND_SIZE: usize = 13;
-
 fn why_not_a_deal(line: &str) -> String {
     let Some(value) = line
         .strip_prefix('[')
@@ -221,15 +221,12 @@ fn why_not_a_deal(line: &str) -> String {
         return format!("the board gives {} hands rather than four", hands.len());
     }
 
-    // Which seat, and how many cards it holds. Phrased to end the same way as
-    // the unknown-hand branch above — every answer this function gives is a
-    // reason a line is not a whole deal, and a caller filtering on that ought
-    // not to have to know which reason it was.
-    //
     // Which seat, and how many cards it holds. A hand that is not thirteen is
     // the usual mistake in a hand-edited file, and the seat is the whole of
     // what someone needs in order to find it — the fallback below is true of
-    // every failure in this function and so tells them nothing.
+    // every failure in this function and so tells them nothing. Phrased to end
+    // the same way as the unknown-hand branch above, so a caller filtering on
+    // the reason need not know which kind of wrong it was.
     //
     // This became reachable when the caller started rejecting a deal that
     // parses but is incomplete: a malformed hand now stops here rather than
