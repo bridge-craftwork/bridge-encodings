@@ -162,8 +162,11 @@ pub fn read_pbn(content: &str) -> Result<Vec<Board>> {
         let line = raw.trim();
 
         // Multi-line commentary block { ... } — capture text until closing brace.
+        // Buffered raw: commentary is prose, and its indentation is the
+        // author's. Trimming each line silently reflows what a renderer lays
+        // out, which is a change to the page, not to whitespace.
         if st.in_commentary {
-            st.commentary_buf.push(line.to_string());
+            st.commentary_buf.push(raw.to_string());
             if line.contains('}') {
                 st.in_commentary = false;
                 flush_commentary(&mut st);
@@ -185,7 +188,7 @@ pub fn read_pbn(content: &str) -> Result<Vec<Board>> {
 
         // Start of a commentary block.
         if line.starts_with('{') {
-            st.commentary_buf.push(line.to_string());
+            st.commentary_buf.push(raw.to_string());
             if line.contains('}') {
                 flush_commentary(&mut st);
             } else {
@@ -221,20 +224,23 @@ pub fn read_pbn(content: &str) -> Result<Vec<Board>> {
                         after_tag: st.last_tag.clone(),
                     });
                 }
+            } else if let Some((tag, data)) = split_tag_and_data(line) {
+                // The standard puts a section's data on the lines after its tag
+                // pair, but producers exist that write the first datum on the
+                // tag line itself — `[Play "W"]SJ`. Dropping the line loses the
+                // tag *and* the datum, and for a Play section that datum is the
+                // opening lead: the loss is total and silent.
+                st.close_sections();
+                st.has_content = true;
+                st.last_tag = Some(tag.name.clone());
+                apply_tag(&mut st, &tag);
+                push_section_data(&mut st, data);
             }
             continue;
         }
 
         // Otherwise: a data line belonging to an open section.
-        if st.in_auction() {
-            st.auction_tokens
-                .extend(line.split_whitespace().map(str::to_string));
-        } else if st.in_play() {
-            st.play_tokens
-                .extend(line.split_whitespace().map(str::to_string));
-        } else if st.in_optimum {
-            st.optimum_rows.push(line.to_string());
-        }
+        push_section_data(&mut st, line);
     }
 
     if st.has_content {
@@ -245,16 +251,23 @@ pub fn read_pbn(content: &str) -> Result<Vec<Board>> {
     Ok(boards)
 }
 
-/// Push the buffered commentary block (braces/whitespace stripped) onto the board.
+/// Push the buffered commentary block onto the board: what stood between the
+/// block's opening `{` and its closing `}`, verbatim.
+///
+/// Only the braces come off. The text between them is the author's, down to the
+/// line breaks and the spaces after them, and a consumer laying it out needs it
+/// as written. Anything after the closing brace is not commentary and is
+/// dropped, as is a block with nothing but whitespace in it.
 fn flush_commentary(st: &mut ParseState) {
     let text = st.commentary_buf.join("\n");
     st.commentary_buf.clear();
-    let text = text
-        .trim()
-        .trim_start_matches('{')
-        .trim_end_matches('}')
-        .trim();
-    if !text.is_empty() {
+    let Some(open) = text.find('{') else { return };
+    let Some(close) = text.rfind('}') else { return };
+    if close <= open {
+        return;
+    }
+    let text = &text[open + 1..close];
+    if !text.trim().is_empty() {
         st.board.commentary.push(text.to_string());
     }
 }
@@ -342,47 +355,158 @@ fn set_opt(field: &mut Option<String>, value: &str) {
     }
 }
 
-/// Build an `Auction` from whitespace-split call tokens. Note-reference tokens
-/// (`=n=`) and section markers (`*`) are skipped; unrecognized tokens are
-/// ignored so a stray annotation never corrupts the call sequence.
+/// Route a line of section data to whichever section is open.
+fn push_section_data(st: &mut ParseState, line: &str) {
+    if st.in_auction() {
+        st.auction_tokens
+            .extend(line.split_whitespace().map(str::to_string));
+    } else if st.in_play() {
+        st.play_tokens
+            .extend(line.split_whitespace().map(str::to_string));
+    } else if st.in_optimum {
+        st.optimum_rows.push(line.to_string());
+    }
+}
+
+/// Split a tag line that carries section data after its closing bracket, as in
+/// `[Play "W"]SJ`. Returns the tag and the data, or `None` if the line is not
+/// that shape — including a well-formed tag line, which has no data to give.
+fn split_tag_and_data(line: &str) -> Option<(TagPair, &str)> {
+    let open = line.find('"')?;
+    let close = open + 1 + line[open + 1..].find('"')?;
+    let bracket = close + 1 + line[close + 1..].find(']')?;
+    let tag = parse_tag_pair(&line[..=bracket])?;
+    let data = line[bracket + 1..].trim();
+    (!data.is_empty()).then_some((tag, data))
+}
+
+/// Build an `Auction` from whitespace-split call tokens.
+///
+/// A call token may carry an annotation, either glued to the call (`1C!`,
+/// `2H=1=`) or standing alone after it (`2H =1=`), and both forms mean the same
+/// thing. The annotation is kept verbatim on the call — `"!"`, `"=1="`, `"$2"` —
+/// rather than decoded, so a writer re-emits exactly what the file said and a
+/// consumer that wants the note number reads it off the `=n=` form itself.
+///
+/// This matters more than it looks. Parsing the raw token as a call makes
+/// `Call::from_pbn("1C!")` fail, and a dropped call shifts every later call one
+/// seat: the auction still renders, and it is wrong. Lesson material is full of
+/// these — 1,059 glued markers and 2,441 standalone note references across the
+/// Baker Bridge and ABS collections.
 fn parse_auction(dealer: Direction, tokens: &[String]) -> Auction {
     let mut auction = Auction::new(dealer);
     for tok in tokens {
         if let Some(end) = SectionEnd::from_pbn(tok) {
             auction.end = end;
+            // `*` closes the section and nothing follows it. `+` is different:
+            // the standard has it *replace the next call to be made* (3.5), so
+            // it stands in a call's place and the annotations after it are that
+            // placeholder's. Keeping it as a call is what gives them something
+            // to attach to — and Bridge Composer, which writes `1D X Pass + $2`,
+            // renders exactly that: the placeholder and its "?" annotation.
+            if end == SectionEnd::Continued {
+                auction.add_call(Call::Continue);
+                continue;
+            }
             break;
         }
-        if tok.starts_with('=') {
+        // "AP" — all pass. The three players yet to speak each pass, and the
+        // auction is over. Not in the standard's call grammar, but Bridge
+        // Composer and most lesson producers write it.
+        if tok.eq_ignore_ascii_case("AP") {
+            for _ in 0..3 {
+                auction.add_call(Call::Pass);
+            }
+            break;
+        }
+        let (call_tok, annotation) = split_annotation(tok);
+        if call_tok.is_empty() {
+            // A standalone annotation belongs to the call before it.
+            if let (Some(ann), Some(last)) = (annotation, auction.calls.last_mut()) {
+                match last.annotation {
+                    Some(ref mut existing) => existing.push_str(ann),
+                    None => last.annotation = Some(ann.to_string()),
+                }
+            }
             continue;
         }
-        if let Some(call) = Call::from_pbn(tok) {
-            auction.add_call(call);
+        if let Some(call) = Call::from_pbn(call_tok) {
+            auction.add_annotated_call(call, annotation.map(str::to_string));
         }
     }
     auction
 }
 
+/// Split a call token into the call itself and any annotation trailing it.
+///
+/// Safe to split on the first `=`, `!`, `?` or `$` because no call token
+/// contains one: the grammar is a level and a strain, `Pass`/`P`/`-`, `X`, `XX`,
+/// `+`, or a run of underscores. A token that is *all* annotation (`=1=`, `$2`)
+/// returns an empty call.
+fn split_annotation(tok: &str) -> (&str, Option<&str>) {
+    match tok.find(['=', '!', '?', '$']) {
+        Some(at) => (&tok[..at], Some(&tok[at..])),
+        None => (tok, None),
+    }
+}
+
 /// Build a `PlaySequence` from whitespace-split card tokens, rotating the lead
-/// to each trick's winner. Best-effort: unknown cards (`-`) are skipped, so a
-/// redacted play may not reconstruct exact trick boundaries.
+/// to each trick's winner.
+///
+/// The four seats of a trick are filled in order, the opening leader first
+/// (3.6), and `-` — a card unknown or not played — holds its seat like any
+/// other token. Dropping the dashes instead slides every later card one seat
+/// left, which does not merely lose information: a line like `- - - HJ`, whose
+/// lead is *not* on record, comes back claiming ♥J was led. A handout then
+/// prints a confident, wrong opening lead.
+///
+/// `+` likewise stands in for the card not yet played and holds its seat; the
+/// standard notes it need not be the section's last token (`+ - - CQ`).
 fn parse_play(leader: Direction, trump: Option<Suit>, tokens: &[String]) -> PlaySequence {
     let mut seq = PlaySequence::new(leader, trump);
+    let mut seat = 0usize;
+
     for tok in tokens {
+        if seq.tricks.is_empty() {
+            seq.start_trick(leader);
+        }
+        // A full trick hands the lead to its winner — or, when the trick holds
+        // unknowns and has no winner, back to whoever led it.
+        if seat == 4 {
+            let last = seq.tricks.last().expect("a trick is open");
+            let next_leader = last.winner.unwrap_or(last.leader);
+            seq.start_trick(next_leader);
+            seat = 0;
+        }
+
         if let Some(end) = SectionEnd::from_pbn(tok) {
             seq.end = end;
+            if end == SectionEnd::Continued {
+                seat += 1;
+                continue;
+            }
             break;
         }
+
+        if tok == "-" {
+            seat += 1;
+            continue;
+        }
+
         let Some(card) = parse_card(tok) else {
             continue;
         };
-        // Start a fresh trick, led by the previous winner, once one completes.
-        if let Some(last) = seq.tricks.last() {
-            if last.is_complete() {
-                let next_leader = last.winner.unwrap_or(leader);
-                seq.start_trick(next_leader);
-            }
+        let trick = seq.tricks.last_mut().expect("a trick is open");
+        if seat == 0 {
+            // Seat 0 through the trick's own API, which records the led suit.
+            trick.play(card);
+        } else {
+            trick.cards[seat] = Some(card);
         }
-        seq.play_card(card);
+        seat += 1;
+        if trick.is_complete() {
+            trick.determine_winner(trump);
+        }
     }
     seq
 }
@@ -831,5 +955,167 @@ all thirteen.}
             b.double_dummy_tricks.as_ref(),
             Some(&dd_table_from_pbn("44444444444444444444").unwrap())
         );
+    }
+
+    #[test]
+    fn an_annotated_call_survives_with_its_annotation() {
+        // The failure this guards against is not a lost annotation but a lost
+        // *call*: parsing "1C!" as a call fails, and dropping it moves every
+        // later call one seat.
+        let boards = read_pbn("[Board \"1\"]\n[Auction \"N\"]\n1C! 1H 2C$1 Pass\n").unwrap();
+        let a = boards[0].auction.as_ref().unwrap();
+        assert_eq!(a.len(), 4);
+        assert_eq!(a.calls[0].call, Call::bid(1, Strain::Clubs));
+        assert_eq!(a.calls[0].annotation.as_deref(), Some("!"));
+        assert_eq!(a.calls[1].call, Call::bid(1, Strain::Hearts));
+        assert_eq!(a.calls[1].annotation, None);
+        assert_eq!(a.calls[2].call, Call::bid(2, Strain::Clubs));
+        assert_eq!(a.calls[2].annotation.as_deref(), Some("$1"));
+        assert_eq!(a.calls[3].call, Call::Pass);
+    }
+
+    #[test]
+    fn a_standalone_note_reference_annotates_the_call_before_it() {
+        // Both spellings occur, and they mean the same thing. The standalone
+        // form is the common one: 2,441 of them across the lesson collections.
+        let glued = read_pbn("[Board \"1\"]\n[Auction \"E\"]\n2NT=1= Pass\n").unwrap();
+        let spaced = read_pbn("[Board \"1\"]\n[Auction \"E\"]\n2NT =1= Pass\n").unwrap();
+        for boards in [glued, spaced] {
+            let a = boards[0].auction.as_ref().unwrap();
+            assert_eq!(a.len(), 2, "the reference is not a call");
+            assert_eq!(a.calls[0].annotation.as_deref(), Some("=1="));
+            assert_eq!(a.calls[1].call, Call::Pass);
+        }
+    }
+
+    #[test]
+    fn a_note_reference_resolves_against_the_note_tag() {
+        let boards =
+            read_pbn("[Board \"1\"]\n[Auction \"N\"]\n1NT =1= Pass\n[Note \"1:15-17 balanced\"]\n")
+                .unwrap();
+        let a = boards[0].auction.as_ref().unwrap();
+        assert_eq!(a.calls[0].annotation.as_deref(), Some("=1="));
+        assert_eq!(a.get_note(1), Some("15-17 balanced"));
+    }
+
+    #[test]
+    fn ap_is_the_three_passes_it_stands_for() {
+        let boards = read_pbn("[Board \"1\"]\n[Auction \"N\"]\n1NT Pass 3NT AP\n").unwrap();
+        let a = boards[0].auction.as_ref().unwrap();
+        assert_eq!(a.len(), 6);
+        assert!(a.calls[3..].iter().all(|c| c.call == Call::Pass));
+        // The auction is over: nothing after AP is read.
+        let boards = read_pbn("[Board \"1\"]\n[Auction \"N\"]\nPass AP 1NT\n").unwrap();
+        assert_eq!(boards[0].auction.as_ref().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn a_continue_marker_stands_in_for_the_call_not_yet_made() {
+        // `+` replaces the next call (3.5), so it holds a call's place and the
+        // NAG after it is that placeholder's annotation. Verified against
+        // Bridge Composer 5.118.2, which writes `1D X Pass + $2` and renders
+        // the South cell as "??" — the placeholder and its "?" annotation.
+        let boards = read_pbn("[Board \"1\"]\n[Auction \"W\"]\n1D X Pass + $2\n").unwrap();
+        let a = boards[0].auction.as_ref().unwrap();
+        assert_eq!(a.len(), 4);
+        assert_eq!(a.calls[3].call, Call::Continue);
+        assert_eq!(a.calls[3].annotation.as_deref(), Some("$2"));
+        assert_eq!(a.end, SectionEnd::Continued);
+
+        // A bare `+` is the same placeholder with nothing to say about it.
+        let boards = read_pbn("[Board \"1\"]\n[Auction \"W\"]\n1D X Pass +\n").unwrap();
+        let a = boards[0].auction.as_ref().unwrap();
+        assert_eq!(a.len(), 4);
+        assert_eq!(a.calls[3].annotation, None);
+
+        // `*` is the other marker, and it is not a call.
+        let boards = read_pbn("[Board \"1\"]\n[Auction \"W\"]\n1D X Pass *\n").unwrap();
+        let a = boards[0].auction.as_ref().unwrap();
+        assert_eq!(a.len(), 3);
+        assert_eq!(a.end, SectionEnd::Terminated);
+    }
+
+    #[test]
+    fn a_placeholder_is_written_back_once() {
+        // The `+` comes from the call; appending the end marker as well would
+        // write it twice.
+        use crate::pbn::write_pbn;
+        let pbn = "[Board \"1\"]\n[Auction \"W\"]\n1D X Pass + $2\n";
+        let out = write_pbn(&read_pbn(pbn).unwrap());
+        assert!(out.contains("1D X Pass +$2"), "in:\n{out}");
+        assert!(
+            !out.contains("+$2\n+"),
+            "the marker is not written twice:\n{out}"
+        );
+        assert_eq!(
+            write_pbn(&read_pbn(&out).unwrap()),
+            out,
+            "stable on re-read"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_token_is_still_skipped() {
+        // Splitting on the annotation characters must not turn junk into calls.
+        let boards = read_pbn("[Board \"1\"]\n[Auction \"N\"]\n1NT wat! Pass\n").unwrap();
+        assert_eq!(boards[0].auction.as_ref().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn section_data_on_the_tag_line_is_taken_not_dropped() {
+        // `[Play "W"]SJ`: the opening lead jammed onto the tag. Refusing the
+        // line loses the tag as well as the datum, which is how a whole
+        // collection's opening leads went missing without a word.
+        let boards = read_pbn("[Board \"1\"]\n[Play \"W\"]SJ\nH2 D3 C4 S2\n").unwrap();
+        let play = boards[0].play.as_ref().expect("a play section");
+        assert_eq!(play.opening_leader, Direction::West);
+        assert_eq!(
+            play.tricks[0].cards[0],
+            Some(Card::new(Suit::Spades, Rank::Jack)),
+            "the lead is the datum on the tag line"
+        );
+
+        // The same for an auction.
+        let boards = read_pbn("[Board \"1\"]\n[Auction \"N\"]1NT\nPass 3NT Pass\n").unwrap();
+        let auction = boards[0].auction.as_ref().expect("an auction");
+        assert_eq!(auction.len(), 4);
+        assert_eq!(auction.calls[0].call, Call::bid(1, Strain::NoTrump));
+
+        // A well-formed tag line is untouched by this path.
+        let boards = read_pbn("[Board \"1\"]\n[Play \"W\"]\nSJ\n").unwrap();
+        assert_eq!(
+            boards[0].play.as_ref().unwrap().tricks[0].cards[0],
+            Some(Card::new(Suit::Spades, Rank::Jack))
+        );
+    }
+
+    #[test]
+    fn a_dash_holds_its_seat_in_a_trick() {
+        // `- - - HJ` with East on lead: the lead is not on record, and ♥J is
+        // North's card, the fourth of the trick. Skipping the dashes would
+        // report ♥J as the opening lead — an invented fact, not a lost one.
+        let boards = read_pbn("[Board \"1\"]\n[Play \"E\"]\n- - - HJ\n").unwrap();
+        let play = boards[0].play.as_ref().unwrap();
+        let trick = &play.tricks[0];
+        assert_eq!(trick.cards[0], None, "the opening lead is unknown");
+        assert_eq!(trick.cards[3], Some(Card::new(Suit::Hearts, Rank::Jack)));
+        assert_eq!(
+            trick.card_by(Direction::North),
+            Some(Card::new(Suit::Hearts, Rank::Jack))
+        );
+        assert_eq!(trick.lead_suit, None);
+    }
+
+    #[test]
+    fn a_placeholder_holds_its_seat_too() {
+        // The standard's own example: `+` is West's, and the cards after it
+        // keep their seats (3.6).
+        let boards = read_pbn("[Board \"1\"]\n[Play \"W\"]\nH2 H3 H4 HA\n+ - - CQ\n").unwrap();
+        let play = boards[0].play.as_ref().unwrap();
+        assert_eq!(play.tricks.len(), 2);
+        let second = &play.tricks[1];
+        assert_eq!(second.cards[0], None, "West has not played yet");
+        assert_eq!(second.cards[3], Some(Card::new(Suit::Clubs, Rank::Queen)));
+        assert_eq!(play.end, SectionEnd::Continued);
     }
 }

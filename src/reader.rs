@@ -136,12 +136,16 @@ impl<R: BufRead> Iterator for DealReader<R> {
             // through left a file of partial boards reading as an empty file,
             // with nothing anywhere to say a board had been passed over.
             if line.starts_with("[Deal ") {
+                // Completeness is checked here rather than left to the parse:
+                // `-` for an unknown hand is legal PBN and parses, but a deal
+                // short of four hands is not something this reader can hand a
+                // caller as a deal. Saying so is the whole point of the branch.
                 return Some(match try_parse_pbn_deal_tag(&line) {
-                    Some(deal) => {
+                    Some(deal) if deal.is_complete() => {
                         self.deals_read += 1;
                         Ok(deal)
                     }
-                    None => Err(ParseError::Pbn(format!(
+                    _ => Err(ParseError::Pbn(format!(
                         "line {}: {}",
                         self.line_number,
                         why_not_a_deal(&line)
