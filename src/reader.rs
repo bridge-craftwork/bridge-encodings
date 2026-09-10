@@ -173,6 +173,9 @@ fn try_parse_pbn_deal_tag(line: &str) -> Option<Deal> {
     Deal::from_pbn(value)
 }
 
+/// Cards in a whole hand.
+const HAND_SIZE: usize = 13;
+
 /// Why a `[Deal ...]` tag could not be read, in the reader's own words.
 ///
 /// `Deal::from_pbn` answers `None` and nothing else, so the reason is worked out
@@ -217,6 +220,37 @@ fn why_not_a_deal(line: &str) -> String {
     if hands.len() != 4 {
         return format!("the board gives {} hands rather than four", hands.len());
     }
+
+    // Which seat, and how many cards it holds. A hand that is not thirteen is
+    // the usual mistake in a hand-edited file, and the seat is the whole of
+    // what someone needs in order to find it — the fallback below is true of
+    // every failure in this function and so tells them nothing. Phrased to end
+    // the same way as the unknown-hand branch above, so a caller filtering on
+    // the reason need not know which kind of wrong it was.
+    //
+    // This became reachable when the caller started rejecting a deal that
+    // parses but is incomplete: a malformed hand now stops here rather than
+    // reaching a caller that could look at the deal itself and say which hand
+    // was wrong. Saying it here says it once, for every reader.
+    let from = bridge_types::Direction::from_char(first.chars().next().unwrap())
+        .expect("checked immediately above");
+    for (seat, hand) in from.clockwise_from().iter().zip(hands.iter()) {
+        match bridge_types::Hand::from_pbn(hand) {
+            Some(parsed) if parsed.len() == HAND_SIZE => {}
+            Some(parsed) => {
+                return format!(
+                    "{seat} has {} cards rather than {HAND_SIZE}, so it is not a whole deal",
+                    parsed.len()
+                )
+            }
+            None => {
+                return format!(
+                    "{seat}'s cards, `{hand}`, are not a hand, so it is not a whole deal"
+                )
+            }
+        }
+    }
+
     format!("`{value}` is not a deal this reader can parse")
 }
 
@@ -225,6 +259,43 @@ mod tests {
     use super::*;
     use bridge_types::Direction;
     use std::io::Cursor;
+
+    /// A hand that is not thirteen cards names its seat.
+    ///
+    /// The message is what someone with a hand-edited file has to work from:
+    /// "not a deal" is true of every failure here and points at nothing.
+    #[test]
+    fn a_hand_that_is_not_thirteen_cards_names_its_seat() {
+        // West, listed last from North, holds fourteen.
+        let line =
+            "[Deal \"N:AKQJ.AKQ.AKQ.AKQ 432.432.432.5432 T98.T98.T98.T987 7655.J765.J765.J6\"]";
+        let why = why_not_a_deal(line);
+        assert!(why.contains("West"), "should name the seat: {why}");
+        assert!(why.contains("14"), "should say how many: {why}");
+        // Shared with the unknown-hand branch, so a caller can filter on the
+        // reason without knowing which kind of wrong it was.
+        assert!(why.contains("not a whole deal"), "{why}");
+    }
+
+    /// And the seat is counted clockwise from the one the tag names, not from
+    /// North — getting this wrong would name a hand that is perfectly fine.
+    #[test]
+    fn the_seat_is_counted_from_the_one_the_tag_names() {
+        // Listed from West, so the second hand is North's, and it is short.
+        let line =
+            "[Deal \"W:AKQJ.AKQ.AKQ.AKQ 432.432.432.543 T98.T98.T98.T987 65.J765.J765.J65\"]";
+        let why = why_not_a_deal(line);
+        assert!(why.contains("North"), "should name North: {why}");
+    }
+
+    /// The dash case still answers first: an unknown hand is legal PBN, and
+    /// "gives 2 of the four hands" is a different problem from a bad one.
+    #[test]
+    fn an_incomplete_board_says_how_many_hands_it_gives() {
+        let line = "[Deal \"W:- KT82.74.AK63.AJ7 - A4.KJ98.T872.865\"]";
+        let why = why_not_a_deal(line);
+        assert!(why.contains("2 of the four hands"), "{why}");
+    }
 
     #[test]
     fn test_read_oneline_deals() {
