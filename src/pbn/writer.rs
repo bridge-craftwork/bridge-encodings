@@ -6,7 +6,7 @@
 
 use std::collections::HashSet;
 
-use bridge_types::{Auction, Board, Card, Direction, PlaySequence};
+use bridge_types::{Auction, Board, Call, Card, Direction, PlaySequence};
 
 /// Write boards to PBN format
 pub fn write_pbn(boards: &[Board]) -> String {
@@ -133,13 +133,22 @@ fn board_lines(board: &Board) -> (usize, Vec<String>) {
         }
     }
 
-    // Auction section.
+    // Auction section, followed by the notes its calls refer to. A `=n=`
+    // annotation without its `[Note "n:..."]` is a dangling reference, so the
+    // two are written together or not at all.
     if let Some(ref auction) = board.auction {
         out.section(
             "Auction",
             &auction.dealer.to_char().to_string(),
             auction_lines(auction),
         );
+        let mut numbers: Vec<_> = auction.notes.keys().copied().collect();
+        numbers.sort_unstable();
+        for n in numbers {
+            if let Some(text) = auction.get_note(n) {
+                out.tag("Note", &format!("{n}:{text}"));
+            }
+        }
     }
 
     // Play section.
@@ -245,6 +254,11 @@ fn direction_tag(dir: Direction) -> &'static str {
 
 /// Format an auction's calls, four per line (one bidding round per line),
 /// closed by its end marker when it has one.
+///
+/// An annotation is written glued to its call (`2H=1=`), which is how the
+/// reader took it in and the form that cannot be misread: a space would leave
+/// it looking like a token of its own, which is legal but reads as annotating
+/// whatever it happens to follow after a line wrap.
 fn auction_lines(auction: &Auction) -> Vec<String> {
     let mut lines: Vec<String> = auction
         .calls
@@ -252,12 +266,20 @@ fn auction_lines(auction: &Auction) -> Vec<String> {
         .map(|round| {
             round
                 .iter()
-                .map(|c| c.call.to_pbn())
+                .map(|c| match c.annotation {
+                    Some(ref ann) => format!("{}{}", c.call.to_pbn(), ann),
+                    None => c.call.to_pbn(),
+                })
                 .collect::<Vec<_>>()
                 .join(" ")
         })
         .collect();
-    lines.extend(auction.end.to_pbn().map(str::to_string));
+    // A `Call::Continue` already writes the `+`; adding the end marker too
+    // would write it twice.
+    let marker_is_a_call = matches!(auction.calls.last().map(|c| &c.call), Some(Call::Continue));
+    if !marker_is_a_call {
+        lines.extend(auction.end.to_pbn().map(str::to_string));
+    }
     lines
 }
 
@@ -438,8 +460,9 @@ mod tests {
 
     #[test]
     fn a_directive_anchored_to_an_unwritten_tag_is_still_written() {
-        // `Note` is parsed into the auction rather than re-emitted as a tag, so
-        // its anchor never comes up. The line still has to land somewhere.
+        // `Note` is re-emitted only from an auction's notes, so on a board
+        // with no auction its anchor never comes up. The line still has to
+        // land somewhere.
         let board = Board::new()
             .with_number(1)
             .with_directive("% orphaned by the writer", Some("Note"));
@@ -491,5 +514,35 @@ mod tests {
         // An unmarked auction gains no marker.
         let pbn = "[Board \"1\"]\n[Auction \"N\"]\n1NT Pass Pass Pass\n";
         assert!(!write_pbn(&read_pbn(pbn).unwrap()).contains('*'));
+    }
+
+    #[test]
+    fn an_annotated_call_and_its_note_round_trip_together() {
+        use crate::pbn::read_pbn;
+
+        let pbn = "[Board \"1\"]\n[Auction \"N\"]\n1NT=1= Pass\n[Note \"1:15-17 balanced\"]\n";
+        let out = write_pbn(&read_pbn(pbn).unwrap());
+        assert!(out.contains("1NT=1= Pass"), "annotation is kept:\n{out}");
+        assert!(
+            out.contains("[Note \"1:15-17 balanced\"]"),
+            "the note it refers to is written too, or the reference dangles:\n{out}"
+        );
+        assert_eq!(
+            write_pbn(&read_pbn(&out).unwrap()),
+            out,
+            "stable on re-read"
+        );
+    }
+
+    #[test]
+    fn ap_is_written_as_the_passes_it_meant() {
+        use crate::pbn::read_pbn;
+
+        // "AP" is read as three passes, so that is what comes back out. The
+        // file changes shape; the auction it describes does not.
+        let out =
+            write_pbn(&read_pbn("[Board \"1\"]\n[Auction \"N\"]\n1NT Pass 3NT AP\n").unwrap());
+        assert!(out.contains("1NT Pass 3NT Pass\nPass Pass"), "in:\n{out}");
+        assert_eq!(write_pbn(&read_pbn(&out).unwrap()), out);
     }
 }
