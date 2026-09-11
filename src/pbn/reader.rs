@@ -288,11 +288,13 @@ fn apply_tag(st: &mut ParseState, tag: &TagPair) {
         }
         "Dealer" => board.dealer = tag.value.chars().next().and_then(Direction::from_char),
         "Vulnerable" => board.vulnerable = Vulnerability::from_pbn(&tag.value).unwrap_or_default(),
-        "Deal" => {
-            if let Some(deal) = Deal::from_pbn(&tag.value) {
-                board.deal = deal;
-            }
-        }
+        "Deal" => match Deal::from_pbn(&tag.value) {
+            Some(deal) => board.deal = deal,
+            // Kept as written: `x` spot cards are no cards a Deal can hold,
+            // and dropping the tag loses the deal outright
+            None if !tag.value.trim().is_empty() => board.unparsed_deal = Some(tag.value.clone()),
+            None => {}
+        },
         "Event" => set_opt(&mut board.event, &tag.value),
         "Site" => set_opt(&mut board.site, &tag.value),
         "Date" => set_opt(&mut board.date, &tag.value),
@@ -1148,5 +1150,19 @@ all thirteen.}
         assert_eq!(second.cards[0], None, "West has not played yet");
         assert_eq!(second.cards[3], Some(Card::new(Suit::Clubs, Rank::Queen)));
         assert_eq!(play.end, SectionEnd::Continued);
+    }
+
+    #[test]
+    fn a_deal_that_does_not_parse_is_kept_as_written() {
+        // Grant Robinson's slides write x for a spot whose rank does not matter
+        let pbn = "[Board \"1\"]\n[Deal \"W:Qx.QJ9xxxx.K.xxx ... ... ...\"]\n";
+        let board = &read_pbn(pbn).unwrap()[0];
+        assert_eq!(
+            board.unparsed_deal.as_deref(),
+            Some("W:Qx.QJ9xxxx.K.xxx ... ... ...")
+        );
+
+        let pbn = "[Board \"1\"]\n[Deal \"N:K843.T542.J6.863 AQJ7.K.Q75.AT942 962.AJ7.KT82.J75 T5.Q9863.A943.KQ\"]\n";
+        assert_eq!(read_pbn(pbn).unwrap()[0].unparsed_deal, None);
     }
 }
