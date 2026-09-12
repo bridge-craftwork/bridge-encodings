@@ -106,8 +106,15 @@ fn board_lines(board: &Board) -> (usize, Vec<String>) {
         }
     }
 
-    let first_dir = board.dealer.unwrap_or(Direction::North);
-    out.tag("Deal", &board.deal.to_pbn(first_dir));
+    // A deal that did not parse goes back as it was written, rather than as
+    // the empty deal it parsed to
+    match board.unparsed_deal.as_deref() {
+        Some(text) => out.tag("Deal", text),
+        None => {
+            let first_dir = board.dealer.unwrap_or(Direction::North);
+            out.tag("Deal", &board.deal.to_pbn(first_dir));
+        }
+    }
 
     // Scoring / result block — preserved when present. `Scoring` has no
     // dedicated field, so a value read from a file arrives in `extra_tags`;
@@ -600,6 +607,17 @@ mod tests {
         assert!(
             before < out.find("[Deal ").unwrap(),
             "moved past the deal:\n{out}"
+        );
+    }
+
+    #[test]
+    fn a_deal_that_did_not_parse_is_written_back_as_it_was() {
+        use crate::pbn::read_pbn;
+        let pbn = "[Board \"1\"]\n[Deal \"W:Qx.QJ9xxxx.K.xxx ... ... ...\"]\n";
+        let out = write_pbn(&read_pbn(pbn).unwrap());
+        assert!(
+            out.contains("[Deal \"W:Qx.QJ9xxxx.K.xxx ... ... ...\"]"),
+            "in:\n{out}"
         );
     }
 }
