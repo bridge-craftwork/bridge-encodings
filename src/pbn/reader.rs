@@ -503,11 +503,15 @@ fn parse_play(leader: Direction, trump: Option<Suit>, tokens: &[String]) -> Play
             continue;
         };
         let trick = seq.tricks.last_mut().expect("a trick is open");
-        if seat == 0 {
-            // Seat 0 through the trick's own API, which records the led suit.
-            trick.play(card);
-        } else {
-            trick.cards[seat] = Some(card);
+        // A line's tokens run by seat from the *opening* leader (3.6), while a
+        // trick's own slots run from *its* leader, which is the previous
+        // trick's winner. Those coincide on the first trick and part company
+        // on every one after it, so rotate rather than storing the file's
+        // order and letting Trick read it as its own.
+        let slot = (leader.to_index() + seat + 4 - trick.leader.to_index()) % 4;
+        trick.cards[slot] = Some(card);
+        if slot == 0 {
+            trick.lead_suit = Some(card.suit);
         }
         seat += 1;
         if trick.is_complete() {
@@ -842,6 +846,45 @@ all thirteen.}
         assert!(parse_tag_line("[Board \"1\"] {opens here").is_none());
     }
 
+    /// A line's tokens run by seat from the opening leader; a trick's slots
+    /// run from its own leader. They part company as soon as someone other
+    /// than the opening leader wins a trick, so the reader rotates.
+    ///
+    /// Checked against BridgeComposer 5.118.2, which prints this board's play
+    /// record as `1. S` / lead \u{2665}K, then `2. E` / lead \u{2666}7, and counts
+    /// `Won NS=0 EW=3`.
+    #[test]
+    fn a_trick_after_the_first_is_read_from_its_own_leader() {
+        // [Play "S"], so every line runs S W N E.
+        //   trick 1: S=HK W=H7 N=H3 E=HA  -> East wins with the ace
+        //   trick 2: S=D6 W=D3 N=D2 E=D7  -> East leads, and the led card is D7
+        let pbn = "[Board \"1\"]\n[Contract \"4S\"]\n[Play \"S\"]\nHK H7 H3 HA\nD6 D3 D2 D7\n*\n";
+        let b = &read_pbn(pbn).unwrap()[0];
+        let play = b.play.as_ref().expect("play section kept");
+
+        let one = &play.tricks[0];
+        assert_eq!(one.leader, Direction::South);
+        assert_eq!(one.winner, Some(Direction::East));
+        assert_eq!(one.card_by(Direction::South), parse_card("HK"));
+        assert_eq!(one.card_by(Direction::East), parse_card("HA"));
+
+        let two = &play.tricks[1];
+        assert_eq!(two.leader, Direction::East, "East won, so East leads");
+        assert_eq!(
+            two.cards[0],
+            parse_card("D7"),
+            "slot 0 is the leader's card, not the first token on the line"
+        );
+        assert_eq!(two.lead_suit, Some(Suit::Diamonds));
+        assert_eq!(two.winner, Some(Direction::East), "D7 is the highest");
+
+        // Every seat still holds the card the file gave it
+        assert_eq!(two.card_by(Direction::South), parse_card("D6"));
+        assert_eq!(two.card_by(Direction::West), parse_card("D3"));
+        assert_eq!(two.card_by(Direction::North), parse_card("D2"));
+        assert_eq!(two.card_by(Direction::East), parse_card("D7"));
+    }
+
     #[test]
     fn a_section_keeps_the_marker_it_closed_with() {
         // `*` means no further cards will or can be given, so a play section
@@ -1147,8 +1190,19 @@ all thirteen.}
         let play = boards[0].play.as_ref().unwrap();
         assert_eq!(play.tricks.len(), 2);
         let second = &play.tricks[1];
-        assert_eq!(second.cards[0], None, "West has not played yet");
-        assert_eq!(second.cards[3], Some(Card::new(Suit::Clubs, Rank::Queen)));
+        // South took the first trick with the ace, so South leads the second
+        // and the club queen on its line is South's. Addressed by seat, because
+        // a trick's slots run from its own leader rather than the file's order.
+        assert_eq!(second.leader, Direction::South);
+        assert_eq!(
+            second.card_by(Direction::West),
+            None,
+            "West has not played yet"
+        );
+        assert_eq!(
+            second.card_by(Direction::South),
+            Some(Card::new(Suit::Clubs, Rank::Queen))
+        );
         assert_eq!(play.end, SectionEnd::Continued);
     }
 
