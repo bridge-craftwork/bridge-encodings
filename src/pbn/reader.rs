@@ -215,6 +215,7 @@ pub fn read_pbn(content: &str) -> Result<Vec<Board>> {
                 st.close_sections();
                 st.has_content = true;
                 st.last_tag = Some(tag.name.clone());
+                st.board.tag_order.push(tag.name.clone());
                 apply_tag(&mut st, &tag);
                 // A comment on the tag's own line refers to that tag, and rides
                 // along on the same board-level list as one on a line of its own.
@@ -233,6 +234,7 @@ pub fn read_pbn(content: &str) -> Result<Vec<Board>> {
                 st.close_sections();
                 st.has_content = true;
                 st.last_tag = Some(tag.name.clone());
+                st.board.tag_order.push(tag.name.clone());
                 apply_tag(&mut st, &tag);
                 push_section_data(&mut st, data);
             }
@@ -269,6 +271,8 @@ fn flush_commentary(st: &mut ParseState) {
     let text = &text[open + 1..close];
     if !text.trim().is_empty() {
         st.board.commentary.push(text.to_string());
+        // Where it stood: after this many of the record's tags
+        st.board.commentary_anchors.push(st.board.tag_order.len());
     }
 }
 
@@ -611,6 +615,33 @@ several lines.}
         assert_eq!(boards.len(), 2);
         assert_eq!(boards[0].commentary.len(), 1);
         assert!(boards[0].commentary[0].contains("multi-line"));
+    }
+
+    #[test]
+    fn commentary_keeps_its_place_among_the_tags() {
+        // Kantar's shape: a block between [Board] and [Deal], another after
+        // [Result]. Bridge Composer hides the first and prints the second, so
+        // where each block stood is part of what it says.
+        let pbn = r#"{Before every tag}
+[Event "E"]
+[Board "1"]
+[SkillPath "x"]
+{Between board and deal}
+[Deal "N:K843.T542.J6.863 AQJ7.K.Q75.AT942 962.AJ7.KT82.J75 T5.Q9863.A943.KQ"]
+{Straight after the deal}
+[Result ""]
+{After the result}
+"#;
+        let b = &read_pbn(pbn).unwrap()[0];
+        assert_eq!(
+            b.tag_order,
+            ["Event", "Board", "SkillPath", "Deal", "Result"]
+        );
+        assert_eq!(b.commentary_anchors, [0, 3, 4, 5]);
+        assert_eq!(b.commentary_anchor_tag(0), None);
+        assert_eq!(b.commentary_anchor_tag(1), Some("SkillPath"));
+        assert_eq!(b.commentary_anchor_tag(2), Some("Deal"));
+        assert_eq!(b.commentary_anchor_tag(3), Some("Result"));
     }
 
     #[test]

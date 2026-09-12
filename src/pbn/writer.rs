@@ -93,6 +93,19 @@ fn board_lines(board: &Board) -> (usize, Vec<String>) {
 
     out.tag("Vulnerable", board.vulnerable.to_pbn());
 
+    // Supplemental tags that came before the deal in the source go back before
+    // it. Where a tag stands decides the slot of the commentary that follows
+    // it: Bridge Composer never prints a block between [Board] and [Deal], so
+    // writing the tag after the deal would bring the block into view.
+    // `Scoring` keeps its dedicated line below.
+    let deal_at = board.tag_order.iter().position(|t| t == "Deal");
+    for (name, value) in &board.extra_tags {
+        let before_deal = deal_at.is_some_and(|at| board.tag_order[..at].contains(name));
+        if before_deal && name != "Scoring" && !out.already_wrote(name) {
+            out.tag(name, value);
+        }
+    }
+
     let first_dir = board.dealer.unwrap_or(Direction::North);
     out.tag("Deal", &board.deal.to_pbn(first_dir));
 
@@ -160,11 +173,6 @@ fn board_lines(board: &Board) -> (usize, Vec<String>) {
         );
     }
 
-    // Commentary blocks.
-    for block in &board.commentary {
-        out.line(format!("{{{}}}", block));
-    }
-
     out.finish()
 }
 
@@ -177,6 +185,8 @@ struct TagWriter<'a> {
     emitted: HashSet<String>,
     /// How many lines the board opened with before any tag.
     leading: usize,
+    /// Which commentary blocks have been written, so each goes out once.
+    placed: Vec<bool>,
 }
 
 impl<'a> TagWriter<'a> {
@@ -184,12 +194,17 @@ impl<'a> TagWriter<'a> {
     /// source record.
     fn new(board: &'a Board) -> Self {
         let lines: Vec<String> = board.leading_directives().map(str::to_string).collect();
-        Self {
+        let mut out = Self {
             board,
             leading: lines.len(),
             lines,
             emitted: HashSet::new(),
-        }
+            placed: vec![false; board.commentary.len()],
+        };
+        // Commentary from before every tag is board content, not file header,
+        // so it follows the header's directives without being counted in them.
+        out.push_commentary(|anchor, _| anchor == Some(0));
+        out
     }
 
     /// Write a tag, followed by the directives the board kept after it.
@@ -206,11 +221,6 @@ impl<'a> TagWriter<'a> {
         self.push_directives_after(name);
     }
 
-    /// Write a line that is not a tag.
-    fn line(&mut self, text: String) {
-        self.lines.push(text);
-    }
-
     /// Whether a tag of this name has been written already.
     fn already_wrote(&self, name: &str) -> bool {
         self.emitted.contains(name)
@@ -220,12 +230,33 @@ impl<'a> TagWriter<'a> {
         let board = self.board;
         self.lines
             .extend(board.directives_after(name).map(str::to_string));
-        self.emitted.insert(name.to_string());
+        // A block goes back after the tag it followed, and only after the
+        // first one of that name: a repeated tag such as `Note` would
+        // otherwise write it more than once.
+        if self.emitted.insert(name.to_string()) {
+            self.push_commentary(|_, tag| tag == Some(name));
+        }
+    }
+
+    /// Write, in order, the commentary blocks not yet written whose anchor
+    /// (see `Board::commentary_anchors`) and anchoring tag satisfy `wanted`.
+    fn push_commentary(&mut self, wanted: impl Fn(Option<usize>, Option<&str>) -> bool) {
+        let board = self.board;
+        for (i, block) in board.commentary.iter().enumerate() {
+            let anchor = board.commentary_anchors.get(i).copied();
+            if !self.placed[i] && wanted(anchor, board.commentary_anchor_tag(i)) {
+                self.lines.push(format!("{{{}}}", block));
+                self.placed[i] = true;
+            }
+        }
     }
 
     /// Finish the board, appending any directive whose tag this writer never
     /// emitted — the file had that line, so it goes back somewhere.
     fn finish(mut self) -> (usize, Vec<String>) {
+        // Commentary whose place is unknown, or whose tag was never written,
+        // goes at the end, which is where every block went before anchors.
+        self.push_commentary(|_, _| true);
         let orphans: Vec<String> = self
             .board
             .directives
@@ -544,5 +575,31 @@ mod tests {
             write_pbn(&read_pbn("[Board \"1\"]\n[Auction \"N\"]\n1NT Pass 3NT AP\n").unwrap());
         assert!(out.contains("1NT Pass 3NT Pass\nPass Pass"), "in:\n{out}");
         assert_eq!(write_pbn(&read_pbn(&out).unwrap()), out);
+    }
+
+    #[test]
+    fn commentary_goes_back_after_the_tag_it_followed() {
+        use crate::pbn::read_pbn;
+        // Moving a block changes what it means to Bridge Composer: one between
+        // [Board] and [Deal] is never printed, one after [Result] is. Writing
+        // every block at the end, as this used to, turned the first into the
+        // second.
+        let pbn = "{Leading}\n[Event \"E\"]\n[Board \"1\"]\n[SkillPath \"x\"]\n\
+                   {Before the deal}\n\
+                   [Deal \"N:K843.T542.J6.863 AQJ7.K.Q75.AT942 962.AJ7.KT82.J75 T5.Q9863.A943.KQ\"]\n\
+                   [Result \"10\"]\n{After the result}\n";
+        let out = write_pbn(&read_pbn(pbn).unwrap());
+        let again = &read_pbn(&out).unwrap()[0];
+        let tags: Vec<_> = (0..3).map(|i| again.commentary_anchor_tag(i)).collect();
+        assert_eq!(
+            tags,
+            [None, Some("SkillPath"), Some("Result")],
+            "in:\n{out}"
+        );
+        let before = out.find("{Before the deal}").unwrap();
+        assert!(
+            before < out.find("[Deal ").unwrap(),
+            "moved past the deal:\n{out}"
+        );
     }
 }
