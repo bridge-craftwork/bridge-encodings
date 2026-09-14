@@ -1,0 +1,4 @@
+# Bridge Composer writes CRLF, and the tests compare its files byte for byte:
+# git must not normalise them on checkout or commit.
+*.lin -text
+*.pbn -text

@@ -1,0 +1,29 @@
+% PBN 2.1
+% EXPORT
+
+[Event "LIN probe"]
+[Site ""]
+[Date "2026.09.14"]
+[Board "1"]
+[West "Wendy West"]
+[North "Ned North"]
+[East "Ed East"]
+[South "Sue South"]
+[Dealer "N"]
+[Vulnerable "NS"]
+[Deal "N:K843.T542.J6.863 AQJ7.K.Q75.AT942 962.AJ7.KT82.J75 T5.Q9863.A943.KQ"]
+[Scoring ""]
+[Declarer "E"]
+[Contract "3NT"]
+[Result "9"]
+[Auction "N"]
+Pass 1C! Pass 1H =1=
+Pass 1NT =2= Pass 3NT $2
+Pass Pass Pass
+[Note "1:4+ hearts, could be 5+"]
+[Note "2:12-14 balanced"]
+[Play "S"]
+D2 D3 DJ DQ
+C5 CK C3 CA
+C7 CQ C6 C4
+*

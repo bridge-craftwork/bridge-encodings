@@ -1,0 +1,20 @@
+% PBN 2.1
+% EXPORT
+
+[Event "Void probe"]
+[Site ""]
+[Date ""]
+[Board "5"]
+[West ""]
+[North ""]
+[East ""]
+[South ""]
+[Dealer "N"]
+[Vulnerable "NS"]
+[Deal "N:AKQJT98765432... .AKQJT98765432.. ..AKQJT98765432. ...AKQJT98765432"]
+[Scoring ""]
+[Declarer "N"]
+[Contract "7S"]
+[Result "13"]
+[Auction "N"]
+7S AP
