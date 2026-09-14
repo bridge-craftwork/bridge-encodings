@@ -11,7 +11,7 @@ File format parsers and writers for contract bridge in Rust.
 | Format | Read | Write | Description |
 |--------|------|-------|-------------|
 | **PBN** | Yes | Yes | Portable Bridge Notation - standard interchange format |
-| **LIN** | Yes | No | Bridge Base Online hand records |
+| **LIN** | Yes | Yes | Bridge Base Online hand records |
 | **Oneline** | Yes | Yes | Simple format used by dealer.exe |
 
 ## Installation
@@ -75,14 +75,27 @@ let boards: Vec<Board> = vec![/* ... */];
 let pbn_output = pbn::write_pbn(&boards);
 ```
 
-### Reading LIN Files
+### Reading and Writing LIN
 
 ```rust
-use bridge_encodings::lin;
+use bridge_encodings::{lin, pbn};
 
-let lin_content = "pn|North,East,South,West|st||md|...";
-let boards = lin::read_lin(lin_content).unwrap();
+// Boards: one record per board, laid out the way Bridge Composer exports LIN.
+let boards = lin::parse_lin_file(lin_content).unwrap();
+let records: Vec<lin::LinData> = pbn::read_pbn(pbn_content)
+    .unwrap()
+    .iter()
+    .map(lin::LinData::from_board)
+    .collect();
+let lin_output = lin::write_lin_file(&records);
+
+// Any LIN text, teaching movies included, token by token and back unchanged.
+let doc = lin::LinDocument::parse(movie);
+assert_eq!(doc.to_lin(), movie);
 ```
+
+What Bridge Composer does with LIN, and where this crate departs from it, is
+recorded in [`fixtures/lin/README.md`](fixtures/lin/README.md).
 
 ### Oneline Format
 
