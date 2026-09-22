@@ -79,6 +79,15 @@ doc.set_tags(i, "Note", &["1:Precision"])?;   // no stale notes survive; &[] cle
 doc.set_comment(i, "Deal", "HCP", "4 16 9 11")?; // after [Deal], or replaced in place
 ```
 
+A `%` directive with no keyword — BBA's 28-hex board fingerprint, say — is found
+by a predicate instead. `set_directive` refuses text its own predicate would not
+recognise, since that line would be invisible to the next run and get duplicated:
+
+```rust
+let is_hash = |t: &str| t.len() == 28 && t.chars().all(|c| c.is_ascii_hexdigit());
+doc.set_directive(i, "Board", &hash, is_hash)?; // after [Board], or replaced in place
+```
+
 ### Writing PBN Files
 
 ```rust
