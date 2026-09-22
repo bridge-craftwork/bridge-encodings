@@ -204,6 +204,10 @@ impl PbnDocument {
     /// Setting a tag to the value it already holds is not a modification; see
     /// [`is_modified`](Self::is_modified).
     ///
+    /// A tag is addressed by name, so on a board carrying several tags of that
+    /// name only the first is replaced. For the one tag the standard lets repeat
+    /// — the auction's `Note`s — use [`set_tags`](Self::set_tags).
+    ///
     /// # Errors
     ///
     /// If `board` is out of range, or `name` or `value` could not be written
@@ -251,6 +255,9 @@ impl PbnDocument {
 
     /// Remove a tag from one board, along with any data rows belonging to it.
     ///
+    /// Only the first tag of that name is removed; to clear a repeated tag such
+    /// as `Note`, pass no values to [`set_tags`](Self::set_tags).
+    ///
     /// Removing a tag the board does not carry is not a modification.
     ///
     /// # Errors
@@ -258,6 +265,173 @@ impl PbnDocument {
     /// If `board` is out of range.
     pub fn remove_tag(&mut self, board: usize, name: &str) -> Result<()> {
         self.edit(board, name, None)
+    }
+
+    /// Every value of a tag on one board, in file order.
+    ///
+    /// The reading side of [`set_tags`](Self::set_tags), for the one tag the
+    /// standard lets repeat: PBN 2.1 section 3.5.5 says `Note` tags "may occur
+    /// more than once (unlike other tags)". [`tag`](Self::tag) returns only the
+    /// first.
+    pub fn tag_values(&self, board: usize, name: &str) -> Vec<&str> {
+        let Some(lines) = self.block_lines(board) else {
+            return Vec::new();
+        };
+        tag_spans(&lines)
+            .iter()
+            .filter(|span| span.name == name)
+            .filter_map(|span| tag_value(lines[span.start].0))
+            .collect()
+    }
+
+    /// Replace every `name` tag on one board with exactly `values`, written as
+    /// one contiguous run of single-line tags.
+    ///
+    /// This is how to write a repeated tag — the auction's `Note`s — which
+    /// [`set_tag`](Self::set_tag) cannot do: it addresses a tag by name, so a
+    /// second `set_tag(b, "Note", ..)` replaces the first note instead of adding
+    /// one. Here the whole run is replaced, so re-writing an auction with fewer
+    /// notes than before leaves none of the old ones behind.
+    ///
+    /// The run takes the place of the first existing `name` tag, and any others
+    /// are removed wherever they stood; a file's own order is otherwise never
+    /// rearranged. With none present it is inserted where
+    /// [`set_tag`](Self::set_tag) would put the tag — for `Note`, after the
+    /// auction's calls and ahead of `[Play]`, as section 3.5.5 requires.
+    /// Passing no values removes every `name` tag.
+    ///
+    /// Writing the values the board already carries is not a modification; see
+    /// [`is_modified`](Self::is_modified).
+    ///
+    /// # Errors
+    ///
+    /// If `board` is out of range, or `name` or any value could not be written
+    /// back as a single well-formed tag line. Every value is checked before
+    /// anything is written, so a rejected call leaves the board untouched.
+    pub fn set_tags(&mut self, board: usize, name: &str, values: &[&str]) -> Result<()> {
+        validate_tag_name(name)?;
+        for value in values {
+            validate_value(value)?;
+        }
+        let new: Vec<String> = values
+            .iter()
+            .map(|value| format!("[{name} \"{value}\"]"))
+            .collect();
+
+        self.modify(board, |lines, fallback| {
+            let spans = tag_spans(lines);
+            let existing: Vec<(usize, usize)> = spans
+                .iter()
+                .filter(|span| span.name == name)
+                .map(|span| (span.start, span.end))
+                .collect();
+
+            match existing.first() {
+                Some(&(first, _)) => {
+                    let newline = own_newline(lines, first, fallback);
+                    // Back to front, so each removal leaves the earlier indices
+                    // valid.
+                    for &(start, end) in existing.iter().rev() {
+                        remove_lines(lines, start, end);
+                    }
+                    insert_lines(lines, first, new, &newline);
+                }
+                None => {
+                    let at = insertion_point(&spans, lines, name, false);
+                    let newline = pick_newline(lines, at, fallback).to_string();
+                    insert_lines(lines, at, new, &newline);
+                }
+            }
+        })
+    }
+
+    /// The text of one board's `{key ...}` comment, after the key and with
+    /// surrounding whitespace trimmed, or `None` if the board has none.
+    ///
+    /// Only a complete single-line brace comment beginning with exactly `key`
+    /// matches: `{HCP 10 12 8 10}` for `HCP`, but not `{HCPx}`, not
+    /// `{ HCP ...}`, and not a comment spanning several lines. See
+    /// [`set_comment`](Self::set_comment).
+    pub fn comment(&self, board: usize, key: &str) -> Option<&str> {
+        let lines = self.block_lines(board)?;
+        let first = *keyed_comments(&lines, key).first()?;
+        comment_text(lines[first].0, key)
+    }
+
+    /// Ensure one board carries exactly one `{key text}` comment.
+    ///
+    /// Commentary written by a program — `{Shape 4333 ...}`, `{HCP ...}` — is
+    /// identified by its leading keyword, which is what lets a re-run replace
+    /// it rather than add a second copy. An existing `{key ...}` comment is
+    /// replaced where it stands, and any further copies are removed. Otherwise
+    /// the comment is inserted after the `after_tag` tag: PBN 2.1 section 3.8
+    /// says a comment "refers to the preceding tag", so commentary about a deal
+    /// belongs after `[Deal]`. It goes after any single-line comments already
+    /// following that tag, so successive calls keep the order they were made
+    /// in. If the board has no `after_tag`, it goes after the board's last tag.
+    ///
+    /// An empty `text` writes the bare `{key}`. Re-writing the comment a board
+    /// already carries is not a modification; see
+    /// [`is_modified`](Self::is_modified).
+    ///
+    /// # Errors
+    ///
+    /// If `board` is out of range, `after_tag` is not a usable tag name, `key`
+    /// is empty or contains whitespace or a brace, or `text` is not a single
+    /// line or contains a brace. A brace would end the comment early or make it
+    /// unrecognisable as `key`'s, and the next run would add a duplicate.
+    pub fn set_comment(
+        &mut self,
+        board: usize,
+        after_tag: &str,
+        key: &str,
+        text: &str,
+    ) -> Result<()> {
+        validate_tag_name(after_tag)?;
+        validate_comment_key(key)?;
+        validate_comment_text(text)?;
+        let comment = if text.is_empty() {
+            format!("{{{key}}}")
+        } else {
+            format!("{{{key} {text}}}")
+        };
+
+        self.modify(board, |lines, fallback| {
+            let existing = keyed_comments(lines, key);
+            match existing.first() {
+                Some(&first) => {
+                    let newline = own_newline(lines, first, fallback);
+                    for &index in existing.iter().rev() {
+                        remove_lines(lines, index, index + 1);
+                    }
+                    insert_lines(lines, first, vec![comment], &newline);
+                }
+                None => {
+                    let spans = tag_spans(lines);
+                    let at = comment_insertion_point(&spans, lines, after_tag);
+                    let newline = pick_newline(lines, at, fallback).to_string();
+                    insert_lines(lines, at, vec![comment], &newline);
+                }
+            }
+        })
+    }
+
+    /// Remove every `{key ...}` comment from one board, matched as
+    /// [`comment`](Self::comment) matches them. Any other commentary stays.
+    ///
+    /// Removing a comment the board does not carry is not a modification.
+    ///
+    /// # Errors
+    ///
+    /// If `board` is out of range, or `key` could not be a comment key (see
+    /// [`set_comment`](Self::set_comment)).
+    pub fn remove_comment(&mut self, board: usize, key: &str) -> Result<()> {
+        validate_comment_key(key)?;
+        self.modify(board, |lines, _| {
+            for &index in keyed_comments(lines, key).iter().rev() {
+                remove_lines(lines, index, index + 1);
+            }
+        })
     }
 
     /// Whether an edit has actually changed the file.
@@ -295,10 +469,47 @@ impl PbnDocument {
         Some(split_lines(text))
     }
 
-    /// Replace, remove or insert one tag span in the block holding `board`,
-    /// then re-render that block. A render identical to the original bytes
-    /// clears the edit, so a no-op edit leaves the document unmodified.
+    /// Replace, remove or insert one tag span in the block holding `board`.
     fn edit(&mut self, board: usize, name: &str, replacement: Option<Vec<String>>) -> Result<()> {
+        self.modify(board, |lines, fallback| {
+            let spans = tag_spans(lines);
+            let existing = spans.iter().find(|span| span.name == name);
+
+            match (existing, replacement) {
+                (Some(span), Some(new)) => {
+                    let (start, end) = (span.start, span.end);
+                    // Prefer the ending the replaced header already used, so a
+                    // file with mixed endings keeps this record's.
+                    let newline = own_newline(lines, start, fallback);
+                    remove_lines(lines, start, end);
+                    insert_lines(lines, start, new, &newline);
+                }
+                (Some(span), None) => {
+                    let (start, end) = (span.start, span.end);
+                    remove_lines(lines, start, end);
+                }
+                (None, Some(new)) => {
+                    let at = insertion_point(&spans, lines, name, new.len() > 1);
+                    let newline = pick_newline(lines, at, fallback).to_string();
+                    insert_lines(lines, at, new, &newline);
+                }
+                // Removing a tag that is not there changes nothing.
+                (None, None) => {}
+            }
+        })
+    }
+
+    /// Apply `change` to the lines of the block holding `board`, then re-render
+    /// that block. A render identical to the original bytes clears the edit, so
+    /// a change that turns out to be a no-op leaves the document unmodified.
+    ///
+    /// `change` is infallible by design: callers validate everything first, so
+    /// a rejected edit never leaves a board half-modified.
+    fn modify(
+        &mut self,
+        board: usize,
+        change: impl FnOnce(&mut Vec<(String, String)>, &str),
+    ) -> Result<()> {
         let block_index = *self.board_blocks.get(board).ok_or_else(|| {
             ParseError::Pbn(format!(
                 "board index {board} out of range ({} board(s) in document)",
@@ -316,33 +527,7 @@ impl PbnDocument {
             .map(|(content, term)| (content.to_string(), term.to_string()))
             .collect();
 
-        let spans = tag_spans(&lines);
-        let existing = spans.iter().find(|span| span.name == name);
-
-        match (existing, replacement) {
-            (Some(span), Some(new)) => {
-                let (start, end) = (span.start, span.end);
-                // Prefer the ending the replaced header already used, so a file
-                // with mixed endings keeps this record's.
-                let newline = match lines[start].1.as_str() {
-                    "" => pick_newline(&lines, start, self.newline).to_string(),
-                    own => own.to_string(),
-                };
-                remove_lines(&mut lines, start, end);
-                insert_lines(&mut lines, start, new, &newline);
-            }
-            (Some(span), None) => {
-                let (start, end) = (span.start, span.end);
-                remove_lines(&mut lines, start, end);
-            }
-            (None, Some(new)) => {
-                let at = insertion_point(&spans, &lines, name, new.len() > 1);
-                let newline = pick_newline(&lines, at, self.newline).to_string();
-                insert_lines(&mut lines, at, new, &newline);
-            }
-            // Removing a tag that is not there changes nothing.
-            (None, None) => return Ok(()),
-        }
+        change(&mut lines, self.newline);
 
         let mut rendered = String::with_capacity(current.len() + 64);
         for (content, term) in &lines {
@@ -526,6 +711,65 @@ fn tag_spans<S: AsRef<str>>(lines: &[(S, S)]) -> Vec<TagSpan> {
     spans
 }
 
+/// Line indices of a block's `{key ...}` comments: complete single-line brace
+/// comments, outside any comment spanning several lines, whose text begins with
+/// exactly `key`.
+fn keyed_comments<S: AsRef<str>>(lines: &[(S, S)], key: &str) -> Vec<usize> {
+    let mut found = Vec::new();
+    let mut in_braces = false;
+    for (index, (content, _)) in lines.iter().enumerate() {
+        let content = content.as_ref();
+        if !in_braces && comment_text(content, key).is_some() {
+            found.push(index);
+        }
+        in_braces = update_braces(content, in_braces);
+    }
+    found
+}
+
+/// The text after `key`, trimmed, when `line` is one complete `{key ...}`
+/// comment. The key must be followed by whitespace or the closing brace, so
+/// `HCP` does not match `{HCPx}`.
+fn comment_text<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+    let rest = single_line_comment(line)?.strip_prefix(key)?;
+    if rest.is_empty() {
+        return Some(rest);
+    }
+    rest.starts_with(char::is_whitespace).then(|| rest.trim())
+}
+
+/// The inside of `line` when the whole line is exactly one brace comment.
+///
+/// Braces do not nest (section 3.8), so a brace anywhere inside means the line
+/// holds more than one comment — `{a} {b}` — and is not a single one.
+fn single_line_comment(line: &str) -> Option<&str> {
+    let inner = line.trim().strip_prefix('{')?.strip_suffix('}')?;
+    (!inner.contains(['{', '}'])).then_some(inner)
+}
+
+/// The line index a new comment should be inserted at: after the `after_tag`
+/// span, or the block's last tag if it has no such tag, and after any
+/// single-line comments already following it — so comments inserted one after
+/// another keep the order they were inserted in.
+fn comment_insertion_point<S: AsRef<str>>(
+    spans: &[TagSpan],
+    lines: &[(S, S)],
+    after_tag: &str,
+) -> usize {
+    let anchor = spans
+        .iter()
+        .find(|span| span.name == after_tag)
+        .or(spans.last());
+    let mut at = anchor.map_or(lines.len(), |span| span.end);
+    while lines
+        .get(at)
+        .is_some_and(|(content, _)| single_line_comment(content.as_ref()).is_some())
+    {
+        at += 1;
+    }
+    at
+}
+
 /// Sort key deciding where a new tag lands, in the five groups Bridge Composer
 /// normalises a file into — see `fixtures/bridge-composer/README.md`, which is
 /// the standard's export order (PBN 2.1 sections 3.1 and 3.4) confirmed against
@@ -611,6 +855,16 @@ fn pick_newline<'a>(lines: &'a [(String, String)], at: usize, fallback: &'a str)
     fallback
 }
 
+/// The line ending to give lines replacing the one at `at`: that line's own, so
+/// a record in a file with mixed endings keeps its ending, else whatever
+/// [`pick_newline`] finds around it.
+fn own_newline(lines: &[(String, String)], at: usize, fallback: &str) -> String {
+    match lines.get(at).map(|(_, term)| term.as_str()) {
+        Some(own) if !own.is_empty() => own.to_string(),
+        _ => pick_newline(lines, at, fallback).to_string(),
+    }
+}
+
 /// Drop lines `start..end`, keeping a file that ended without a newline ending
 /// without one.
 fn remove_lines(lines: &mut Vec<(String, String)>, start: usize, end: usize) {
@@ -687,6 +941,36 @@ fn validate_value(value: &str) -> Result<()> {
     if value.contains('"') {
         return Err(ParseError::Pbn(format!(
             "tag value may not contain a double quote: {value:?}"
+        )));
+    }
+    Ok(())
+}
+
+/// Reject a comment key that could not be found again by
+/// [`PbnDocument::comment`]: the key is the comment's first word, so it cannot
+/// be empty or contain whitespace, and a brace would end or split the comment.
+fn validate_comment_key(key: &str) -> Result<()> {
+    if key.is_empty()
+        || key
+            .chars()
+            .any(|c| c.is_whitespace() || matches!(c, '{' | '}'))
+    {
+        return Err(ParseError::Pbn(format!(
+            "not a usable comment key: {key:?}"
+        )));
+    }
+    Ok(())
+}
+
+/// Reject comment text that would break out of its line, or contain a brace —
+/// a `}` ends the comment early, and either brace makes the line read as more
+/// than one comment, so the next run would not recognise it and would add a
+/// duplicate.
+fn validate_comment_text(text: &str) -> Result<()> {
+    validate_row(text)?;
+    if text.contains(['{', '}']) {
+        return Err(ParseError::Pbn(format!(
+            "comment text may not contain a brace: {text:?}"
         )));
     }
     Ok(())
@@ -1266,5 +1550,310 @@ mod tests {
         let doc = open(src);
         assert_eq!(doc.boards().len(), 2);
         assert_eq!(doc.to_pbn(), src);
+    }
+
+    /// A board as bba-cli writes it: a deal described by keyed commentary, an
+    /// auction with its notes, and tags and a section it does not own.
+    const BID: &str = concat!(
+        "[Board \"1\"]\n",
+        "[HandType \"Game\"]\n",
+        "[Dealer \"N\"]\n",
+        "[Deal \"N:K843.T542.J6.863 AQJ7.K.Q75.AT942 962.AJ7.KT82.J75 T5.Q9863.A943.KQ\"]\n",
+        "{Shape 4432 4135 3343 2452}\n",
+        "{HCP 4 16 9 11}\n",
+        "[Contract \"3NT\"]\n",
+        "[Auction \"N\"]\n",
+        "Pass 1C =1= Pass 1NT =2=\n",
+        "Pass 3NT AP\n",
+        "[Note \"1:3+ clubs\"]\n",
+        "[Note \"2:12-14\"]\n",
+        "[OptimumResultTable \"Declarer;Result\"]\n",
+        "N NT 9\n",
+    );
+
+    #[test]
+    fn set_tags_writes_several_notes_after_the_calls() {
+        // What set_tag cannot do: a second Note would replace the first.
+        let src = concat!(
+            "[Board \"1\"]\n",
+            "[Auction \"N\"]\n",
+            "1NT =1= Pass 2C =2=\n",
+            "Pass 2D Pass 3NT\n",
+            "AP\n",
+            "[Play \"W\"]\n",
+            "S2 S3 S4 SA\n",
+        );
+        let mut doc = open(src);
+        doc.set_tags(0, "Note", &["1:15-17", "2:Stayman"]).unwrap();
+        assert_eq!(
+            doc.to_pbn(),
+            src.replace(
+                "[Play \"W\"]",
+                "[Note \"1:15-17\"]\n[Note \"2:Stayman\"]\n[Play \"W\"]"
+            )
+        );
+        assert_eq!(doc.tag_values(0, "Note"), vec!["1:15-17", "2:Stayman"]);
+    }
+
+    #[test]
+    fn set_tags_replaces_the_whole_run_leaving_no_stale_tag() {
+        let old_notes = "[Note \"1:3+ clubs\"]\n[Note \"2:12-14\"]\n";
+
+        let mut fewer = open(BID);
+        fewer.set_tags(0, "Note", &["1:Precision"]).unwrap();
+        assert_eq!(
+            fewer.to_pbn(),
+            BID.replace(old_notes, "[Note \"1:Precision\"]\n")
+        );
+
+        let mut more = open(BID);
+        more.set_tags(0, "Note", &["1:a", "2:b", "3:c"]).unwrap();
+        assert_eq!(
+            more.to_pbn(),
+            BID.replace(
+                old_notes,
+                "[Note \"1:a\"]\n[Note \"2:b\"]\n[Note \"3:c\"]\n"
+            )
+        );
+    }
+
+    #[test]
+    fn set_tags_gathers_scattered_tags_where_the_first_stood() {
+        let src = concat!(
+            "[Board \"1\"]\n",
+            "[Auction \"N\"]\n",
+            "1NT =1= AP\n",
+            "[Note \"1:a\"]\n",
+            "[Play \"W\"]\n",
+            "S2 S3 S4 SA\n",
+            "[Note \"2:b\"]\n",
+        );
+        let mut doc = open(src);
+        doc.set_tags(0, "Note", &["1:x", "2:y"]).unwrap();
+        assert_eq!(
+            doc.to_pbn(),
+            concat!(
+                "[Board \"1\"]\n",
+                "[Auction \"N\"]\n",
+                "1NT =1= AP\n",
+                "[Note \"1:x\"]\n",
+                "[Note \"2:y\"]\n",
+                "[Play \"W\"]\n",
+                "S2 S3 S4 SA\n",
+            )
+        );
+    }
+
+    #[test]
+    fn set_tags_with_no_values_removes_every_one() {
+        let mut doc = open(BID);
+        doc.set_tags(0, "Note", &[]).unwrap();
+        assert_eq!(
+            doc.to_pbn(),
+            BID.replace("[Note \"1:3+ clubs\"]\n[Note \"2:12-14\"]\n", "")
+        );
+        assert!(doc.tag_values(0, "Note").is_empty());
+
+        // Where remove_tag, addressing a tag by name, takes only the first.
+        let mut first_only = open(BID);
+        first_only.remove_tag(0, "Note").unwrap();
+        assert_eq!(first_only.tag_values(0, "Note"), vec!["2:12-14"]);
+    }
+
+    #[test]
+    fn re_writing_the_same_tags_is_a_no_op() {
+        let mut doc = open(BID);
+        doc.set_tags(0, "Note", &["1:3+ clubs", "2:12-14"]).unwrap();
+        assert!(!doc.is_modified());
+        assert_eq!(doc.to_pbn(), BID);
+
+        // Clearing a tag the board never had.
+        let mut plain = open(SAMPLE);
+        plain.set_tags(0, "Note", &[]).unwrap();
+        assert!(!plain.is_modified());
+    }
+
+    #[test]
+    fn a_rejected_value_leaves_the_board_untouched() {
+        let mut doc = open(BID);
+        // The first value is fine; the second would break out of its quotes.
+        assert!(doc.set_tags(0, "Note", &["1:ok", "2:a \"quote\""]).is_err());
+        assert!(doc.set_tags(0, "Note", &["1:two\nlines"]).is_err());
+        assert!(doc.set_tags(0, "Bad Name", &["x"]).is_err());
+        assert!(doc.set_tags(9, "Note", &["1:x"]).is_err());
+        assert!(!doc.is_modified());
+        assert_eq!(doc.to_pbn(), BID);
+    }
+
+    #[test]
+    fn set_tags_keeps_crlf_and_a_missing_final_newline() {
+        let src = "[Board \"1\"]\r\n[Auction \"N\"]\r\n1NT =1= AP\r\n[Note \"1:old\"]";
+        let mut doc = open(src);
+        doc.set_tags(0, "Note", &["1:a", "2:b"]).unwrap();
+        assert_eq!(
+            doc.to_pbn(),
+            "[Board \"1\"]\r\n[Auction \"N\"]\r\n1NT =1= AP\r\n[Note \"1:a\"]\r\n[Note \"2:b\"]"
+        );
+    }
+
+    #[test]
+    fn set_comment_inserts_after_its_tag_in_call_order() {
+        let src = concat!(
+            "[Board \"1\"]\n",
+            "[Deal \"N:K843.T542.J6.863 AQJ7.K.Q75.AT942 962.AJ7.KT82.J75 T5.Q9863.A943.KQ\"]\n",
+            "[Contract \"3NT\"]\n",
+        );
+        let mut doc = open(src);
+        doc.set_comment(0, "Deal", "Shape", "4432 4135 3343 2452")
+            .unwrap();
+        doc.set_comment(0, "Deal", "HCP", "4 16 9 11").unwrap();
+        doc.set_comment(0, "Deal", "Losers", "9 5 8 7").unwrap();
+        assert_eq!(
+            doc.to_pbn(),
+            src.replace(
+                "[Contract ",
+                "{Shape 4432 4135 3343 2452}\n{HCP 4 16 9 11}\n{Losers 9 5 8 7}\n[Contract "
+            )
+        );
+        assert_eq!(doc.comment(0, "HCP"), Some("4 16 9 11"));
+    }
+
+    #[test]
+    fn set_comment_replaces_in_place_and_collapses_duplicates() {
+        let src = concat!(
+            "[Board \"1\"]\n",
+            "[Result \"9\"]\n",
+            "{HCP 1 2 3 4}\n",
+            "{Hand-written: nice play.}\n",
+            "[Contract \"3NT\"]\n",
+            "{HCP 9 9 9 9}\n",
+        );
+        let mut doc = open(src);
+        // The anchor is irrelevant once the comment exists: it is never moved.
+        doc.set_comment(0, "Deal", "HCP", "10 11 9 10").unwrap();
+        assert_eq!(
+            doc.to_pbn(),
+            concat!(
+                "[Board \"1\"]\n",
+                "[Result \"9\"]\n",
+                "{HCP 10 11 9 10}\n",
+                "{Hand-written: nice play.}\n",
+                "[Contract \"3NT\"]\n",
+            )
+        );
+    }
+
+    #[test]
+    fn re_writing_a_comment_is_a_no_op() {
+        let mut doc = open(BID);
+        doc.set_comment(0, "Deal", "Shape", "4432 4135 3343 2452")
+            .unwrap();
+        doc.set_comment(0, "Deal", "HCP", "4 16 9 11").unwrap();
+        assert!(!doc.is_modified());
+
+        // Removing one the board does not carry.
+        doc.remove_comment(0, "Losers").unwrap();
+        assert!(!doc.is_modified());
+        assert_eq!(doc.to_pbn(), BID);
+    }
+
+    #[test]
+    fn only_a_whole_single_line_comment_with_that_exact_key_matches() {
+        let src = concat!(
+            "[Board \"1\"]\n",
+            "{HCPx 1}\n",
+            "{ HCP 2}\n",
+            "{HCP 3 spans\n",
+            "two lines}\n",
+            "{Note:\n",
+            "{HCP 4}\n",
+            "{a} {HCP 5}\n",
+            "[Result \"9\"]\n",
+            "{HCP 6}\n",
+        );
+        let mut doc = open(src);
+        assert_eq!(doc.comment(0, "HCP"), Some("6"));
+        doc.remove_comment(0, "HCP").unwrap();
+        // Everything but the one genuine `{HCP ...}` comment is left alone —
+        // including `{HCP 4}`, which sits inside the comment opened by `{Note:`.
+        assert_eq!(doc.to_pbn(), src.replace("{HCP 6}\n", ""));
+
+        let bare = open("[Board \"1\"]\n{Alert}\n");
+        assert_eq!(bare.comment(0, "Alert"), Some(""));
+    }
+
+    #[test]
+    fn a_comment_whose_tag_is_missing_goes_after_the_last_tag() {
+        let mut doc = open("[Board \"1\"]\n[Result \"9\"]\n; trailing remark\n");
+        doc.set_comment(0, "Deal", "HCP", "1 2 3 4").unwrap();
+        assert_eq!(
+            doc.to_pbn(),
+            "[Board \"1\"]\n[Result \"9\"]\n{HCP 1 2 3 4}\n; trailing remark\n"
+        );
+    }
+
+    #[test]
+    fn a_rejected_comment_leaves_the_board_untouched() {
+        let mut doc = open(BID);
+        for (after, key, text) in [
+            ("Deal", "", "x"),
+            ("Deal", "two words", "x"),
+            ("Deal", "a{b", "x"),
+            ("Deal", "HCP", "ends } early"),
+            ("Deal", "HCP", "{nested"),
+            ("Deal", "HCP", "two\nlines"),
+            ("bad tag", "HCP", "x"),
+        ] {
+            assert!(
+                doc.set_comment(0, after, key, text).is_err(),
+                "{after:?} {key:?} {text:?}"
+            );
+        }
+        assert!(doc.remove_comment(0, "").is_err());
+        assert!(doc.set_comment(9, "Deal", "HCP", "x").is_err());
+        assert!(!doc.is_modified());
+    }
+
+    #[test]
+    fn re_bidding_a_board_replaces_what_the_bidder_owns_and_nothing_else() {
+        // The whole of what bba-cli does to a board, run twice: the first pass
+        // replaces its auction, notes and commentary and leaves HandType and the
+        // OptimumResultTable exactly as they were; the second pass is a no-op.
+        fn rebid(doc: &mut PbnDocument) -> Result<()> {
+            doc.set_comment(0, "Deal", "Shape", "4432 4135 3343 2452")?;
+            doc.set_comment(0, "Deal", "HCP", "4 16 9 11")?;
+            doc.set_comment(0, "Deal", "Losers", "9 5 8 7")?;
+            doc.set_tag(0, "Contract", "4H")?;
+            doc.set_section(0, "Auction", "N", &["Pass 1C =1= 1H 4H", "AP"])?;
+            doc.set_tags(0, "Note", &["1:Precision"])
+        }
+
+        let mut doc = open(BID);
+        rebid(&mut doc).unwrap();
+        let once = doc.to_pbn();
+        assert_eq!(
+            once,
+            concat!(
+                "[Board \"1\"]\n",
+                "[HandType \"Game\"]\n",
+                "[Dealer \"N\"]\n",
+                "[Deal \"N:K843.T542.J6.863 AQJ7.K.Q75.AT942 962.AJ7.KT82.J75 T5.Q9863.A943.KQ\"]\n",
+                "{Shape 4432 4135 3343 2452}\n",
+                "{HCP 4 16 9 11}\n",
+                "{Losers 9 5 8 7}\n",
+                "[Contract \"4H\"]\n",
+                "[Auction \"N\"]\n",
+                "Pass 1C =1= 1H 4H\n",
+                "AP\n",
+                "[Note \"1:Precision\"]\n",
+                "[OptimumResultTable \"Declarer;Result\"]\n",
+                "N NT 9\n",
+            )
+        );
+
+        let mut again = open(&once);
+        rebid(&mut again).unwrap();
+        assert!(!again.is_modified());
+        assert_eq!(again.to_pbn(), once);
     }
 }
