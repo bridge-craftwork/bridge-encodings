@@ -65,6 +65,20 @@ and inserted lines take the line ending the surrounding file uses. Setting a tag
 to the value it already holds leaves `is_modified()` false, so repeated runs over
 a tree rewrite nothing.
 
+Two things a tag name alone cannot address have their own calls. `Note` is the
+one tag the standard lets repeat (PBN 2.1 §3.5.5), so `set_tag` — which replaces
+the first tag of a name — cannot write a second note; `set_tags` replaces the
+whole run instead. And program-written commentary such as `{HCP 4 16 9 11}` is
+found by its leading keyword, so a re-run replaces it rather than adding a copy:
+
+```rust
+// Re-bidding a board: its auction, every note, and the deal commentary are
+// replaced; tags the program does not own are left exactly as they were.
+doc.set_section(i, "Auction", "N", &["Pass 1C =1= 1H 4H", "AP"])?;
+doc.set_tags(i, "Note", &["1:Precision"])?;   // no stale notes survive; &[] clears them
+doc.set_comment(i, "Deal", "HCP", "4 16 9 11")?; // after [Deal], or replaced in place
+```
+
 ### Writing PBN Files
 
 ```rust
