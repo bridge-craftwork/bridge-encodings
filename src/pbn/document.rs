@@ -941,15 +941,29 @@ fn insertion_point<S: AsRef<str>>(
     has_rows: bool,
 ) -> usize {
     let rank = tag_rank(name, has_rows);
-    if let Some(span) = spans
+    // Anchor on the last tag, in file order, that ranks at or before the new
+    // one, and insert ahead of the tag that follows it. In a file already in
+    // export order that is exactly "before the first tag ranking after it";
+    // the difference is a file that is not. Practice-Bidding-Scenarios writes
+    // `[HandType]` straight after `[Board]`, and "before the first tag ranking
+    // after it" would put every later mandatory tag — `Scoring`, say — up
+    // there too, ahead of the players and the deal.
+    //
+    // Inserting ahead of the following tag, rather than straight after the
+    // anchor, keeps commentary with the tag it refers to (section 3.8).
+    if let Some(anchor) = spans
         .iter()
-        .find(|span| tag_rank(&span.name, span_has_rows(span)) > rank)
+        .rposition(|span| tag_rank(&span.name, span_has_rows(span)) <= rank)
     {
-        return span.start;
+        return match spans.get(anchor + 1) {
+            Some(next) => next.start,
+            // After every tag, but ahead of any trailing commentary or blank
+            // lines.
+            None => spans[anchor].end,
+        };
     }
-    if let Some(last) = spans.last() {
-        // After every tag, but ahead of any trailing commentary or blank lines.
-        return last.end;
+    if let Some(first) = spans.first() {
+        return first.start;
     }
     // A block with no tags at all: land after any leading directives, so a `%`
     // header keeps its place at the top.
@@ -2085,6 +2099,47 @@ mod tests {
         assert_eq!(
             no_anchor.to_pbn(),
             format!("[Deal \"N:- - - -\"]\n% {HASH}\n")
+        );
+    }
+
+    #[test]
+    fn a_new_tag_keeps_to_its_group_in_a_file_out_of_export_order() {
+        // Practice-Bidding-Scenarios' leveled deals carry `[HandType]` straight
+        // after `[Board]`, ahead of the mandatory tags it should follow. New
+        // tags must still land in their own group, not be dragged up with it.
+        let src = concat!(
+            "[Board \"1\"]\n",
+            "[HandType \"Game\"]\n",
+            "[West \"-\"]\n",
+            "[Deal \"N:- - - -\"]\n",
+            "{Shape 4333 4333 4333 4333}\n",
+            "[Declarer \"?\"]\n",
+            "[Result \"?\"]\n",
+            "[OptimumResultTable \"Declarer;Result\"]\n",
+            "N NT 9\n",
+        );
+        let mut doc = open(src);
+        doc.set_tag(0, "Scoring", "MP").unwrap();
+        doc.set_tag(0, "BidSystemNS", "2/1").unwrap();
+        doc.set_section(0, "Auction", "N", &["1NT AP"]).unwrap();
+        assert_eq!(
+            doc.to_pbn(),
+            concat!(
+                "[Board \"1\"]\n",
+                "[HandType \"Game\"]\n",
+                "[West \"-\"]\n",
+                "[Deal \"N:- - - -\"]\n",
+                // After the deal's commentary, which refers to the deal.
+                "{Shape 4333 4333 4333 4333}\n",
+                "[Scoring \"MP\"]\n",
+                "[Declarer \"?\"]\n",
+                "[Result \"?\"]\n",
+                "[BidSystemNS \"2/1\"]\n",
+                "[Auction \"N\"]\n",
+                "1NT AP\n",
+                "[OptimumResultTable \"Declarer;Result\"]\n",
+                "N NT 9\n",
+            )
         );
     }
 }
