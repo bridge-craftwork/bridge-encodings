@@ -408,7 +408,9 @@ impl PbnDocument {
                 }
                 None => {
                     let spans = tag_spans(lines);
-                    let at = comment_insertion_point(&spans, lines, after_tag);
+                    let at = insertion_point_after(&spans, lines, after_tag, |line| {
+                        single_line_comment(line).is_some()
+                    });
                     let newline = pick_newline(lines, at, fallback).to_string();
                     insert_lines(lines, at, vec![comment], &newline);
                 }
@@ -429,6 +431,99 @@ impl PbnDocument {
         validate_comment_key(key)?;
         self.modify(board, |lines, _| {
             for &index in keyed_comments(lines, key).iter().rev() {
+                remove_lines(lines, index, index + 1);
+            }
+        })
+    }
+
+    /// The text after the `%` of one board's first directive that `recognises`
+    /// accepts, trimmed, or `None` if it carries none.
+    ///
+    /// A directive is a line with `%` in its first column, outside any `{...}`
+    /// comment (PBN 2.1 section 3.8). `recognises` is given each directive's
+    /// trimmed text. See [`set_directive`](Self::set_directive).
+    pub fn directive(&self, board: usize, recognises: impl Fn(&str) -> bool) -> Option<&str> {
+        let lines = self.block_lines(board)?;
+        let first = *matching_directives(&lines, &recognises).first()?;
+        directive_text(lines[first].0)
+    }
+
+    /// Ensure one board carries exactly one directive that `recognises`
+    /// accepts, written as `% {text}`.
+    ///
+    /// For directives a program writes into a board and must replace on a
+    /// re-run — such as BBA's 28-hex board fingerprint after `[Board]`. Unlike
+    /// commentary (see [`set_comment`](Self::set_comment)) such a line may have
+    /// no keyword to find it by, since its whole text is the value; so the
+    /// caller says what its own directive looks like.
+    ///
+    /// An existing match is replaced where it stands and any further copies
+    /// are removed. Otherwise the directive is inserted after the `after_tag`
+    /// tag and any directives already following it, or after the board's last
+    /// tag if it has no `after_tag`. Re-writing the directive a board already
+    /// carries is not a modification; see [`is_modified`](Self::is_modified).
+    ///
+    /// # Errors
+    ///
+    /// If `board` is out of range, `after_tag` is not a usable tag name, `text`
+    /// is not a single line — or `recognises` does not accept `text` itself.
+    /// That last check is what keeps re-runs honest: a directive its own
+    /// predicate cannot see would be invisible to the next run, which would add
+    /// a second copy.
+    pub fn set_directive(
+        &mut self,
+        board: usize,
+        after_tag: &str,
+        text: &str,
+        recognises: impl Fn(&str) -> bool,
+    ) -> Result<()> {
+        validate_tag_name(after_tag)?;
+        validate_row(text)?;
+        let line = format!("% {}", text.trim());
+        // Judge the text exactly as it will be read back.
+        if !directive_text(&line).is_some_and(&recognises) {
+            return Err(ParseError::Pbn(format!(
+                "directive {text:?} is not one its own predicate recognises, so a re-run would duplicate it"
+            )));
+        }
+
+        self.modify(board, |lines, fallback| {
+            let existing = matching_directives(lines, &recognises);
+            match existing.first() {
+                Some(&first) => {
+                    let newline = own_newline(lines, first, fallback);
+                    for &index in existing.iter().rev() {
+                        remove_lines(lines, index, index + 1);
+                    }
+                    insert_lines(lines, first, vec![line], &newline);
+                }
+                None => {
+                    let spans = tag_spans(lines);
+                    let at = insertion_point_after(&spans, lines, after_tag, |line| {
+                        directive_text(line).is_some()
+                    });
+                    let newline = pick_newline(lines, at, fallback).to_string();
+                    insert_lines(lines, at, vec![line], &newline);
+                }
+            }
+        })
+    }
+
+    /// Remove every directive `recognises` accepts from one board. Any other
+    /// directive stays.
+    ///
+    /// Removing a directive the board does not carry is not a modification.
+    ///
+    /// # Errors
+    ///
+    /// If `board` is out of range.
+    pub fn remove_directive(
+        &mut self,
+        board: usize,
+        recognises: impl Fn(&str) -> bool,
+    ) -> Result<()> {
+        self.modify(board, |lines, _| {
+            for &index in matching_directives(lines, &recognises).iter().rev() {
                 remove_lines(lines, index, index + 1);
             }
         })
@@ -747,14 +842,40 @@ fn single_line_comment(line: &str) -> Option<&str> {
     (!inner.contains(['{', '}'])).then_some(inner)
 }
 
-/// The line index a new comment should be inserted at: after the `after_tag`
-/// span, or the block's last tag if it has no such tag, and after any
-/// single-line comments already following it — so comments inserted one after
-/// another keep the order they were inserted in.
-fn comment_insertion_point<S: AsRef<str>>(
+/// Line indices of a block's directives that `recognises` accepts. A `%` inside
+/// a `{...}` comment is an ordinary character (section 3.8), so those lines are
+/// skipped.
+fn matching_directives<S: AsRef<str>>(
+    lines: &[(S, S)],
+    recognises: &impl Fn(&str) -> bool,
+) -> Vec<usize> {
+    let mut found = Vec::new();
+    let mut in_braces = false;
+    for (index, (content, _)) in lines.iter().enumerate() {
+        let content = content.as_ref();
+        if !in_braces && directive_text(content).is_some_and(recognises) {
+            found.push(index);
+        }
+        in_braces = update_braces(content, in_braces);
+    }
+    found
+}
+
+/// The trimmed text after the `%` when `line` is a directive — `%` in the first
+/// column, as the standard requires.
+fn directive_text(line: &str) -> Option<&str> {
+    line.strip_prefix('%').map(str::trim)
+}
+
+/// The line index to insert a comment or directive at: after the `after_tag`
+/// span, or the block's last tag if it has no such tag, then past any lines of
+/// the same kind already there — so lines inserted one after another keep the
+/// order they were inserted in.
+fn insertion_point_after<S: AsRef<str>>(
     spans: &[TagSpan],
     lines: &[(S, S)],
     after_tag: &str,
+    same_kind: impl Fn(&str) -> bool,
 ) -> usize {
     let anchor = spans
         .iter()
@@ -763,7 +884,7 @@ fn comment_insertion_point<S: AsRef<str>>(
     let mut at = anchor.map_or(lines.len(), |span| span.end);
     while lines
         .get(at)
-        .is_some_and(|(content, _)| single_line_comment(content.as_ref()).is_some())
+        .is_some_and(|(content, _)| same_kind(content.as_ref()))
     {
         at += 1;
     }
@@ -820,15 +941,29 @@ fn insertion_point<S: AsRef<str>>(
     has_rows: bool,
 ) -> usize {
     let rank = tag_rank(name, has_rows);
-    if let Some(span) = spans
+    // Anchor on the last tag, in file order, that ranks at or before the new
+    // one, and insert ahead of the tag that follows it. In a file already in
+    // export order that is exactly "before the first tag ranking after it";
+    // the difference is a file that is not. Practice-Bidding-Scenarios writes
+    // `[HandType]` straight after `[Board]`, and "before the first tag ranking
+    // after it" would put every later mandatory tag — `Scoring`, say — up
+    // there too, ahead of the players and the deal.
+    //
+    // Inserting ahead of the following tag, rather than straight after the
+    // anchor, keeps commentary with the tag it refers to (section 3.8).
+    if let Some(anchor) = spans
         .iter()
-        .find(|span| tag_rank(&span.name, span_has_rows(span)) > rank)
+        .rposition(|span| tag_rank(&span.name, span_has_rows(span)) <= rank)
     {
-        return span.start;
+        return match spans.get(anchor + 1) {
+            Some(next) => next.start,
+            // After every tag, but ahead of any trailing commentary or blank
+            // lines.
+            None => spans[anchor].end,
+        };
     }
-    if let Some(last) = spans.last() {
-        // After every tag, but ahead of any trailing commentary or blank lines.
-        return last.end;
+    if let Some(first) = spans.first() {
+        return first.start;
     }
     // A block with no tags at all: land after any leading directives, so a `%`
     // header keeps its place at the top.
@@ -1855,5 +1990,156 @@ mod tests {
         rebid(&mut again).unwrap();
         assert!(!again.is_modified());
         assert_eq!(again.to_pbn(), once);
+    }
+
+    /// BBA's board fingerprint: the whole directive is 28 hex digits, with no
+    /// keyword to find it by.
+    fn is_bba_hash(text: &str) -> bool {
+        text.len() == 28 && text.chars().all(|c| c.is_ascii_hexdigit())
+    }
+
+    const HASH: &str = "000B6835D55DDDE2A07889A2F0DF";
+
+    #[test]
+    fn set_directive_inserts_after_its_tag() {
+        let mut doc = open("[Board \"1\"]\n[North \"-\"]\n");
+        doc.set_directive(0, "Board", HASH, is_bba_hash).unwrap();
+        assert_eq!(
+            doc.to_pbn(),
+            format!("[Board \"1\"]\n% {HASH}\n[North \"-\"]\n")
+        );
+        assert_eq!(doc.directive(0, is_bba_hash), Some(HASH));
+    }
+
+    #[test]
+    fn set_directive_replaces_in_place_and_leaves_other_directives_alone() {
+        let src = concat!(
+            "%HRTitleEvent \"1N\"\n",
+            "[Board \"1\"]\n",
+            "% AAAAAAAAAAAAAAAAAAAAAAAAAAAA\n",
+            "[North \"-\"]\n",
+            "% BBBBBBBBBBBBBBBBBBBBBBBBBBBB\n",
+        );
+        let mut doc = open(src);
+        doc.set_directive(0, "Board", HASH, is_bba_hash).unwrap();
+        let once = doc.to_pbn();
+        assert_eq!(
+            once,
+            format!("%HRTitleEvent \"1N\"\n[Board \"1\"]\n% {HASH}\n[North \"-\"]\n")
+        );
+
+        // The re-run a bba/ file gets: identical, so not a modification.
+        let mut again = open(&once);
+        again.set_directive(0, "Board", HASH, is_bba_hash).unwrap();
+        assert!(!again.is_modified());
+    }
+
+    #[test]
+    fn a_directive_its_own_predicate_would_miss_is_rejected() {
+        let mut doc = open("[Board \"1\"]\n[North \"-\"]\n");
+        // Written, this would be invisible to the next run and get duplicated.
+        assert!(doc
+            .set_directive(0, "Board", "not a hash", is_bba_hash)
+            .is_err());
+        assert!(doc
+            .set_directive(0, "Board", "two\nlines", |_| true)
+            .is_err());
+        assert!(doc.set_directive(0, "bad tag", HASH, is_bba_hash).is_err());
+        assert!(doc.set_directive(9, "Board", HASH, is_bba_hash).is_err());
+        assert!(!doc.is_modified());
+    }
+
+    #[test]
+    fn a_percent_inside_commentary_or_off_column_one_is_not_a_directive() {
+        let src = concat!(
+            "[Board \"1\"]\n",
+            "{A remark\n",
+            "% AAAAAAAAAAAAAAAAAAAAAAAAAAAA\n",
+            "still the remark}\n",
+            " % BBBBBBBBBBBBBBBBBBBBBBBBBBBB\n",
+        );
+        let mut doc = open(src);
+        assert_eq!(doc.directive(0, is_bba_hash), None);
+        doc.remove_directive(0, is_bba_hash).unwrap();
+        assert!(!doc.is_modified());
+    }
+
+    #[test]
+    fn remove_directive_removes_every_match_and_nothing_else() {
+        let src = concat!(
+            "[Board \"1\"]\n",
+            "% AAAAAAAAAAAAAAAAAAAAAAAAAAAA\n",
+            "%HRTitleEvent \"1N\"\n",
+            "[North \"-\"]\n",
+            "% BBBBBBBBBBBBBBBBBBBBBBBBBBBB\n",
+        );
+        let mut doc = open(src);
+        doc.remove_directive(0, is_bba_hash).unwrap();
+        assert_eq!(
+            doc.to_pbn(),
+            "[Board \"1\"]\n%HRTitleEvent \"1N\"\n[North \"-\"]\n"
+        );
+    }
+
+    #[test]
+    fn inserted_directives_keep_call_order_line_endings_and_a_missing_anchor() {
+        let mut doc = open("[Board \"1\"]\r\n[North \"-\"]\r\n");
+        doc.set_directive(0, "Board", HASH, is_bba_hash).unwrap();
+        doc.set_directive(0, "Board", "Seed 7", |t| t.starts_with("Seed "))
+            .unwrap();
+        assert_eq!(
+            doc.to_pbn(),
+            format!("[Board \"1\"]\r\n% {HASH}\r\n% Seed 7\r\n[North \"-\"]\r\n")
+        );
+
+        let mut no_anchor = open("[Deal \"N:- - - -\"]\n");
+        no_anchor
+            .set_directive(0, "Board", HASH, is_bba_hash)
+            .unwrap();
+        assert_eq!(
+            no_anchor.to_pbn(),
+            format!("[Deal \"N:- - - -\"]\n% {HASH}\n")
+        );
+    }
+
+    #[test]
+    fn a_new_tag_keeps_to_its_group_in_a_file_out_of_export_order() {
+        // Practice-Bidding-Scenarios' leveled deals carry `[HandType]` straight
+        // after `[Board]`, ahead of the mandatory tags it should follow. New
+        // tags must still land in their own group, not be dragged up with it.
+        let src = concat!(
+            "[Board \"1\"]\n",
+            "[HandType \"Game\"]\n",
+            "[West \"-\"]\n",
+            "[Deal \"N:- - - -\"]\n",
+            "{Shape 4333 4333 4333 4333}\n",
+            "[Declarer \"?\"]\n",
+            "[Result \"?\"]\n",
+            "[OptimumResultTable \"Declarer;Result\"]\n",
+            "N NT 9\n",
+        );
+        let mut doc = open(src);
+        doc.set_tag(0, "Scoring", "MP").unwrap();
+        doc.set_tag(0, "BidSystemNS", "2/1").unwrap();
+        doc.set_section(0, "Auction", "N", &["1NT AP"]).unwrap();
+        assert_eq!(
+            doc.to_pbn(),
+            concat!(
+                "[Board \"1\"]\n",
+                "[HandType \"Game\"]\n",
+                "[West \"-\"]\n",
+                "[Deal \"N:- - - -\"]\n",
+                // After the deal's commentary, which refers to the deal.
+                "{Shape 4333 4333 4333 4333}\n",
+                "[Scoring \"MP\"]\n",
+                "[Declarer \"?\"]\n",
+                "[Result \"?\"]\n",
+                "[BidSystemNS \"2/1\"]\n",
+                "[Auction \"N\"]\n",
+                "1NT AP\n",
+                "[OptimumResultTable \"Declarer;Result\"]\n",
+                "N NT 9\n",
+            )
+        );
     }
 }
