@@ -191,6 +191,26 @@ impl PbnDocument {
             .collect()
     }
 
+    /// One board's record: its block of the file, exactly as written with any
+    /// edits applied, or `None` if `board` is out of range.
+    ///
+    /// The block runs up to and including the blank line(s) that end it, so
+    /// records concatenate into well-formed PBN -- except the file's last,
+    /// which ends however the file does. A leading `%` header block carries no
+    /// board and belongs to no record. Two boards written with no blank line
+    /// between them share a block, and both return all of it.
+    ///
+    /// This is how a caller extracts some boards of a file without
+    /// re-serialising them: commentary, directives, tag order and line endings
+    /// all come through untouched.
+    pub fn record(&self, board: usize) -> Option<&str> {
+        let block = self.blocks.get(*self.board_blocks.get(board)?)?;
+        Some(match &block.edited {
+            Some(edited) => edited.as_str(),
+            None => &self.text[block.range.clone()],
+        })
+    }
+
     /// Set or insert a single-line tag on one board, leaving every other byte
     /// of the file alone.
     ///
@@ -556,12 +576,7 @@ impl PbnDocument {
 
     /// The current text of the block holding `board`, split into lines.
     fn block_lines(&self, board: usize) -> Option<Vec<(&str, &str)>> {
-        let block = self.blocks.get(*self.board_blocks.get(board)?)?;
-        let text = match &block.edited {
-            Some(edited) => edited.as_str(),
-            None => &self.text[block.range.clone()],
-        };
-        Some(split_lines(text))
+        Some(split_lines(self.record(board)?))
     }
 
     /// Replace, remove or insert one tag span in the block holding `board`.
@@ -1183,6 +1198,25 @@ mod tests {
         assert_eq!(ids, vec![Some(1), Some(2)]);
         // The directive block carries no board and is not addressable.
         assert_eq!(doc.board_blocks, vec![1, 2]);
+    }
+
+    #[test]
+    fn records_are_the_boards_blocks_verbatim() {
+        let mut doc = open(SAMPLE);
+        let first = doc.record(0).unwrap();
+        assert!(first.starts_with("[Event \"Club\"]\n[Board \"1\"]"));
+        assert!(first.ends_with("Then run the clubs.}\n\n"));
+        // The directive block belongs to no record, and the last record ends
+        // as the file does.
+        assert_eq!(
+            format!("{}{}", doc.record(0).unwrap(), doc.record(1).unwrap()),
+            SAMPLE[SAMPLE.find("[Event").unwrap()..]
+        );
+        assert!(doc.record(2).is_none());
+
+        doc.set_tag(1, "Board", "7").unwrap();
+        assert!(doc.record(1).unwrap().starts_with("[Board \"7\"]"));
+        assert!(doc.record(0).unwrap().contains("[Board \"1\"]"));
     }
 
     #[test]
