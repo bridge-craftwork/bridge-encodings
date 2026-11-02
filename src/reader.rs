@@ -2,7 +2,8 @@
 //!
 //! Reads deals from any `BufRead` source, auto-detecting PBN, oneline,
 //! and printall formats. Non-deal lines (PBN metadata, blank lines,
-//! statistics output) are silently skipped.
+//! statistics output) are skipped; [`DealReader::skipped_lines`] counts the
+//! non-blank ones.
 //!
 //! # Example
 //!
@@ -23,13 +24,16 @@ use std::io::BufRead;
 /// Reads deals from a text source (file, stdin, network stream, etc.).
 ///
 /// Supports PBN, oneline, and printall formats with auto-detection.
-/// Non-deal lines are silently skipped, making it safe to feed raw
-/// dealer.exe output (which includes statistics lines) directly.
+/// Non-deal lines are skipped, making it safe to feed raw dealer.exe output
+/// (which includes statistics lines) directly. A damaged deal that does not
+/// announce itself looks the same as those lines, so
+/// [`skipped_lines`](Self::skipped_lines) reports how many were passed over.
 pub struct DealReader<R: BufRead> {
     reader: R,
     line_buf: String,
     line_number: usize,
     deals_read: usize,
+    skipped_lines: usize,
 }
 
 impl<R: BufRead> DealReader<R> {
@@ -40,12 +44,23 @@ impl<R: BufRead> DealReader<R> {
             line_buf: String::new(),
             line_number: 0,
             deals_read: 0,
+            skipped_lines: 0,
         }
     }
 
     /// Number of deals successfully read so far.
     pub fn deals_read(&self) -> usize {
         self.deals_read
+    }
+
+    /// Number of non-blank lines passed over so far without yielding anything.
+    ///
+    /// The reader cannot tell metadata from damage, so this counts both: a PBN
+    /// file's tags are in here alongside a corrupt oneline deal. It is a figure
+    /// for the caller to weigh against [`deals_read`](Self::deals_read), not an
+    /// error count. A line that yields `Err` is reported there and not counted.
+    pub fn skipped_lines(&self) -> usize {
+        self.skipped_lines
     }
 
     /// Current line number in the input.
@@ -74,7 +89,11 @@ impl<R: BufRead> DealReader<R> {
         for _ in 0..4 {
             match self.read_line() {
                 Ok(true) => suit_lines.push(self.line_buf.clone()),
-                Ok(false) => return None,
+                Ok(false) => {
+                    // Truncated mid-board. The caller counts the header line.
+                    self.skipped_lines += suit_lines.len();
+                    return None;
+                }
                 Err(e) => return Some(Err(ParseError::Io(e))),
             }
         }
@@ -161,6 +180,7 @@ impl<R: BufRead> Iterator for DealReader<R> {
             }
 
             // Unrecognized line — skip (PBN metadata, stats, comments, etc.)
+            self.skipped_lines += 1;
         }
     }
 }
@@ -425,6 +445,49 @@ n A754.7642.KJ2.A9 e QT.AK95.87.K8652 s K93.J83.QT6543.T w J862.QT.A9.QJ743
         reader.next();
         assert_eq!(reader.deals_read(), 2);
         assert_eq!(reader.line_number(), 2);
+    }
+
+    #[test]
+    fn skipped_lines_counts_what_was_passed_over_and_not_what_was_read() {
+        // A corrupt oneline deal (a rank that is not a card) reads as just another skipped
+        // line, which is why the count has to exist. Blank lines are not
+        // counted, and neither are lines that yield a deal.
+        let input = "\
+Generated 100 hands
+
+n AKQT3.J6.KJ42.95 e 652.AK42.AQ87.T4 s J74.QT95.T.AK863 w 98.873.9653.QX72
+n A754.7642.KJ2.A9 e QT.AK95.87.K8652 s K93.J83.QT6543.T w J862.QT.A9.QJ743
+Time needed    0.123 sec
+";
+        let mut reader = DealReader::new(Cursor::new(input));
+        assert_eq!(reader.skipped_lines(), 0);
+        assert!(reader.next().expect("one good deal").is_ok());
+        assert_eq!(reader.skipped_lines(), 2, "statistics and corrupt deal");
+        assert!(reader.next().is_none());
+        assert_eq!(reader.skipped_lines(), 3, "and the trailing statistics");
+        assert_eq!(reader.deals_read(), 1);
+    }
+
+    #[test]
+    fn skipped_lines_leaves_out_a_deal_tag_that_yields_an_error() {
+        let input = "[Event \"x\"]\n[Deal \"N:AKQJ.AKQ.AKQ.AKQ 432.432.432.5432\"]\n";
+        let mut reader = DealReader::new(Cursor::new(input));
+        assert!(reader.next().expect("the bad tag").is_err());
+        assert!(reader.next().is_none());
+        assert_eq!(reader.skipped_lines(), 1, "only the Event tag");
+    }
+
+    #[test]
+    fn skipped_lines_counts_a_printall_board_truncated_mid_write() {
+        let input = "\
+   1.
+J 7 3               9 8                 A Q 5 4 2           K T 6
+3                   9 6 4 2             K J 8 7             A Q T 5
+";
+        let mut reader = DealReader::new(Cursor::new(input));
+        assert!(reader.next().is_none());
+        assert_eq!(reader.skipped_lines(), 3, "the header and two suit lines");
+        assert_eq!(reader.deals_read(), 0);
     }
 
     #[test]
