@@ -17,6 +17,7 @@
 //! output.
 
 mod document;
+mod to_board;
 mod writer;
 
 pub use document::{LinDocument, LinToken};
