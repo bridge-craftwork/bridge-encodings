@@ -13,7 +13,7 @@ dependencies = [
 [[package]]
 name = "bridge-types"
 version = "0.1.0"
-source = "git+https://github.com/bridge-craftwork/bridge-types#ad9ac556f91fdf405215121261212ad98936bf83"
+source = "git+https://github.com/bridge-craftwork/bridge-types#76cb38c20cca9933abbb6658fd483d0978fabc92"
 
 [[package]]
 name = "proc-macro2"
