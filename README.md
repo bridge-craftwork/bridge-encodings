@@ -112,6 +112,10 @@ let records: Vec<lin::LinData> = pbn::read_pbn(pbn_content)
     .collect();
 let lin_output = lin::write_lin_file(&records);
 
+// LIN to PBN: each record as the board Bridge Composer opens it as.
+let pbn_boards: Vec<_> = boards.iter().map(lin::LinData::to_board).collect();
+let pbn_output = pbn::write_pbn(&pbn_boards);
+
 // Any LIN text, teaching movies included, token by token and back unchanged.
 let doc = lin::LinDocument::parse(movie);
 assert_eq!(doc.to_lin(), movie);
