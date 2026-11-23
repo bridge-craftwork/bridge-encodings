@@ -337,20 +337,33 @@ fn auction_lines(auction: &Auction) -> Vec<String> {
 /// Format a play sequence, one trick per line in play order, closed by its end
 /// marker when it has one.
 fn play_lines(play: &PlaySequence) -> Vec<String> {
-    let mut lines: Vec<String> = play
+    // A line's columns run by seat from the *opening* leader (PBN 2.1 §3.6),
+    // while a trick holds its cards from its own leader. They agree on the
+    // first trick only; writing a trick in its own order put each later
+    // lead in the wrong seat. A seat with no card holds its place with `-`.
+    let seats = play.opening_leader.clockwise_from();
+    let mut lines: Vec<Vec<String>> = play
         .tricks
         .iter()
+        .filter(|trick| trick.cards.iter().any(Option::is_some))
         .map(|trick| {
-            trick
-                .cards
+            seats
                 .iter()
-                .flatten()
-                .map(card_to_pbn)
+                .map(|seat| {
+                    trick
+                        .card_by(*seat)
+                        .map_or_else(|| "-".to_string(), |c| card_to_pbn(&c))
+                })
                 .collect::<Vec<_>>()
-                .join(" ")
         })
-        .filter(|l| !l.is_empty())
         .collect();
+    // An unfinished last trick stops at its last card
+    if let Some(last) = lines.last_mut() {
+        while last.last().is_some_and(|t| t == "-") {
+            last.pop();
+        }
+    }
+    let mut lines: Vec<String> = lines.into_iter().map(|l| l.join(" ")).collect();
     lines.extend(play.end.to_pbn().map(str::to_string));
     lines
 }
@@ -368,6 +381,37 @@ pub fn write_pbn_file(boards: &[Board], path: &std::path::Path) -> std::io::Resu
 
 #[cfg(test)]
 mod tests {
+    /// Play whose lead changes hands: West leads trick one, East wins it and
+    /// leads trick two, and trick three is cut short.
+    const LEAD_CHANGES: &str = "[Board \"1\"]\n[Dealer \"N\"]\n\
+[Deal \"N:K843.T542.J6.863 AQJ7.K.Q75.AT942 962.AJ7.KT82.J75 T5.Q9863.A943.KQ\"]\n\
+[Declarer \"S\"]\n[Contract \"3NT\"]\n\
+[Play \"W\"]\nD3 DJ DQ D2\nCK C3 CA C5\n- - S7\n";
+
+    #[test]
+    fn play_lines_keep_the_opening_leaders_columns() {
+        let boards = crate::pbn::read_pbn(LEAD_CHANGES).unwrap();
+        let play = boards[0].play.as_ref().unwrap();
+        // Trick two is East's lead: its cards run from East
+        assert_eq!(play.tricks[1].leader, Direction::East);
+        let written = write_pbn(&boards);
+        assert!(
+            written.contains("[Play \"W\"]\nD3 DJ DQ D2\nCK C3 CA C5\n- - S7\n"),
+            "{written}"
+        );
+        let again = crate::pbn::read_pbn(&written).unwrap();
+        let cards = |b: &Board| {
+            b.play
+                .as_ref()
+                .unwrap()
+                .tricks
+                .iter()
+                .map(|t| (t.leader, t.cards))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(cards(&again[0]), cards(&boards[0]));
+    }
+
     use super::*;
     use bridge_types::{Deal, Vulnerability};
 
