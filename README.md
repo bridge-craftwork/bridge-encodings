@@ -154,6 +154,9 @@ The PBN (Portable Bridge Notation) format is the standard for bridge data interc
 ### Sections (read/write)
 - `Auction` - parsed into a typed `Auction`, with `Note` annotations
 - `Play` - parsed into a typed `PlaySequence`
+- `DoubleDummyPlay` - card-by-card double-dummy costs of the play, a PBN extension
+  specified in [docs/double-dummy-play.md](docs/double-dummy-play.md); parsed into
+  `Board::double_dummy_play`
 - `{...}` commentary blocks - preserved in `Board::commentary`
 
 ### Directives and Comments

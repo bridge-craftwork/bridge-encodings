@@ -99,12 +99,33 @@ struct ParseState {
     /// The two encodings are redundant by design and only one of them has a
     /// specification to be checked against; see [`super::dd`].
     dd_from_optimum: bool,
+    /// An open `DoubleDummyPlay` section: its leader and data so far.
+    dd_play_leader: Option<Direction>,
+    dd_play_tokens: Vec<String>,
+    /// A closed `DoubleDummyPlay` section, decoded once the whole record is
+    /// read: it needs the deal and the play, which may come after it.
+    dd_play_section: Option<(Direction, Vec<String>)>,
     /// Name of the most recent tag in this record, so a `%` or `;` line can be
     /// anchored to the tag it follows.
     last_tag: Option<String>,
 }
 
 impl ParseState {
+    /// Close the record: its sections, then the analysis that needed them.
+    /// A `DoubleDummyPlay` that does not fit the deal and play is dropped
+    /// whole; see `docs/double-dummy-play.md`.
+    fn finish_board(&mut self) -> Board {
+        self.close_sections();
+        if let Some((leader, tokens)) = self.dd_play_section.take() {
+            let board = &mut self.board;
+            if let Some(play) = board.play.as_ref() {
+                board.double_dummy_play =
+                    super::double_dummy_play_from_pbn(leader, &tokens, &board.deal, play).ok();
+            }
+        }
+        std::mem::take(&mut self.board)
+    }
+
     fn in_auction(&self) -> bool {
         self.auction_dealer.is_some()
     }
@@ -126,6 +147,10 @@ impl ParseState {
                 self.board.play = Some(parse_play(leader, trump, &self.play_tokens));
             }
             self.play_tokens.clear();
+        }
+        if let Some(leader) = self.dd_play_leader.take() {
+            let tokens = std::mem::take(&mut self.dd_play_tokens);
+            self.dd_play_section = Some((leader, tokens));
         }
         if std::mem::take(&mut self.in_optimum) {
             let rows = std::mem::take(&mut self.optimum_rows);
@@ -177,8 +202,7 @@ pub fn read_pbn(content: &str) -> Result<Vec<Board>> {
         // Blank line terminates the current board.
         if line.is_empty() {
             if st.has_content {
-                st.close_sections();
-                boards.push(std::mem::take(&mut st.board));
+                boards.push(st.finish_board());
                 st.has_content = false;
                 st.last_tag = None;
                 st.dd_from_optimum = false;
@@ -246,8 +270,7 @@ pub fn read_pbn(content: &str) -> Result<Vec<Board>> {
     }
 
     if st.has_content {
-        st.close_sections();
-        boards.push(st.board);
+        boards.push(st.finish_board());
     }
 
     Ok(boards)
@@ -347,6 +370,11 @@ fn apply_tag(st: &mut ParseState, tag: &TagPair) {
         // `extra_tags`: the header alone, with its rows consumed, would be
         // re-emitted as an empty section.
         "OptimumResultTable" => st.in_optimum = true,
+        // Its data follows; `finish_board` decodes it against the deal and
+        // play. Not preserved in `extra_tags`, for the reason given above.
+        "DoubleDummyPlay" => {
+            st.dd_play_leader = tag.value.chars().next().and_then(Direction::from_char);
+        }
         "OptimumScore" => board.optimum_score = Some(tag.value.clone()),
         "ParContract" => board.par_contract = Some(tag.value.clone()),
         // Everything else (standard-but-unmodeled + arbitrary custom tags) is
@@ -371,6 +399,9 @@ fn push_section_data(st: &mut ParseState, line: &str) {
             .extend(line.split_whitespace().map(str::to_string));
     } else if st.in_optimum {
         st.optimum_rows.push(line.to_string());
+    } else if st.dd_play_leader.is_some() {
+        st.dd_play_tokens
+            .extend(line.split_whitespace().map(str::to_string));
     }
 }
 
