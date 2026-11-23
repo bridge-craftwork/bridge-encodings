@@ -171,13 +171,26 @@ fn board_lines(board: &Board) -> (usize, Vec<String>) {
         }
     }
 
-    // Play section.
+    // Play section, and its card-by-card analysis after it. An analysis
+    // that does not fit the deal and play is left out rather than written
+    // half right; see `docs/double-dummy-play.md`.
     if let Some(ref play) = board.play {
         out.section(
             "Play",
             &play.opening_leader.to_char().to_string(),
             play_lines(play),
         );
+        if let Some(lines) = board
+            .double_dummy_play
+            .as_ref()
+            .and_then(|dd| super::double_dummy_play_to_pbn(dd, &board.deal, play).ok())
+        {
+            out.section(
+                "DoubleDummyPlay",
+                &play.opening_leader.to_char().to_string(),
+                lines,
+            );
+        }
     }
 
     out.finish()
